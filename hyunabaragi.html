@@ -339,48 +339,108 @@ function wScore(w){
 
 /* ========================= 장소 검증 (카카오 로컬) ========================= */
 let KAKAO_ERR = '';
-async function kakaoFind(q){
+const CATCODE = { 'FD6':'음식점','CE7':'카페','AT4':'관광명소','CT1':'문화시설','AD5':'숙박','MT1':'마트','CS2':'편의점','PK6':'주차장','SW8':'지하철' };
+function nameCode(name){
+  const n = String(name || '');
+  if(/항$|포구|어항|방파제|등대|해수욕장|해변|해안|바다|섬$|폭포|계곡|공원|수목원|숲길|둘레길|전망대|야경|산$|봉$|사찰|사$|절$|유적|고분|왕릉|다리$|대교$/.test(n)) return 'AT4';
+  if(/시장$|마트$|백화점|아울렛/.test(n)) return 'MT1';
+  if(/미술관|박물관|전시관|기념관|도서관|서점|영화관|공연장|아트|갤러리|공방/.test(n)) return 'CT1';
+  if(/카페$|커피|로스터|베이커리|디저트/.test(n)) return 'CE7';
+  if(/식당$|맛집|횟집|국밥|칼국수|고깃집|포차|주점|이자카야/.test(n)) return 'FD6';
+  return '';
+}
+function normName(x){ return String(x || '').replace(/[\s\-·().,'"]/g,''); }
+function nameMatch(a, b){
+  const x = normName(a), y = normName(b);
+  if(!x || !y) return false;
+  if(x.indexOf(y) >= 0 || y.indexOf(x) >= 0) return true;
+  const grams = (t) => { const g = []; for(let i=0;i<t.length-1;i++) g.push(t.slice(i,i+2)); return g; };
+  const gx = grams(x), gy = grams(y);
+  if(!gx.length || !gy.length) return false;
+  let hit = 0;
+  gx.forEach(g => { if(gy.indexOf(g) >= 0) hit++; });
+  return (hit / Math.min(gx.length, gy.length)) >= 0.4;
+}
+function kindCode(kind){
+  const k = String(kind || '');
+  if(/밥|식당|맛집|음식|점심|저녁|술|바|포차|시장/.test(k)) return 'FD6';
+  if(/카페|디저트|커피|베이커리|브런치/.test(k)) return 'CE7';
+  if(/전시|문화|공방|미술|박물|영화|서점|공연/.test(k)) return 'CT1';
+  if(/산책|공원|해변|바다|전망|야경|관광|명소|사찰|절|숲|수목원|섬|등대/.test(k)) return 'AT4';
+  if(/숙박|호텔|펜션|리조트/.test(k)) return 'AD5';
+  return '';
+}
+async function kakaoFind(q, code, center){
   if(!S.settings.kakao || !q) return { ok:false, fail:true, msg:'키 없음' };
   try{
-    const r = await fetch('https://dapi.kakao.com/v2/local/search/keyword.json?size=5&query=' + encodeURIComponent(q), {
-      headers:{ Authorization:'KakaoAK ' + S.settings.kakao }
-    });
+    const url = 'https://dapi.kakao.com/v2/local/search/keyword.json?size=15&query=' + encodeURIComponent(q)
+      + (code ? '&category_group_code=' + code : '')
+      + (center ? '&x=' + center[1] + '&y=' + center[0] + '&radius=20000&sort=distance' : '');
+    const r = await fetch(url, { headers:{ Authorization:'KakaoAK ' + S.settings.kakao } });
     if(!r.ok){
       let extra = '';
       try{ const e = await r.json(); extra = e.message || e.msg || ''; }catch(x){}
       return { ok:false, fail:true, msg:'HTTP ' + r.status + (extra ? ' · ' + extra : '') };
     }
     const d = await r.json();
-    const docs = (d.documents || []).map(x => ({ name:x.place_name, addr:x.road_address_name || x.address_name || '' }));
+    const docs = (d.documents || [])
+      .filter(x => x.category_group_code)
+      .map(x => ({ name:x.place_name, addr:x.road_address_name || x.address_name || '',
+                   code:x.category_group_code, cat:(x.category_name||'').split('>').pop().trim() }));
     return { ok:true, docs:docs };
   }catch(e){
     return { ok:false, fail:true, msg:'요청 차단됨 (도메인 등록 확인)' };
   }
 }
+function regionTokens(region){
+  const raw = String(region || '').replace(/\s+/g,'');
+  if(!raw) return [];
+  const base = raw.replace(/(특별자치시|특별자치도|광역시|특별시|자치시|자치도)/g,'').replace(/(시|도|군|구)$/,'');
+  const out = [base];
+  Object.keys(KRGEO).forEach(k => { if(raw.indexOf(k) >= 0 && out.indexOf(k) < 0) out.push(k); });
+  return out.filter(Boolean);
+}
 async function verifyStops(list, region, nameKey, queryKey, altKey){
   KAKAO_ERR = '';
   if(!S.settings.kakao) return false;
+  const center = krLookup(region);
+  const toks = regionTokens(region);
+  const inRegion = (addr) => {
+    if(!toks.length) return true;
+    const a = String(addr || '').replace(/\s+/g,'');
+    return toks.some(t => a.indexOf(t) >= 0);
+  };
   const used = [];
-  const pick = (docs) => {
-    for(const d of (docs || [])) if(used.indexOf(d.name) < 0) return d;
+  const pick = (docs, code, strict) => {
+    for(const d of (docs || [])){
+      if(used.indexOf(d.name) >= 0) continue;
+      if(code && d.code !== code) continue;
+      if(strict && !inRegion(d.addr)) continue;
+      return d;
+    }
     return null;
   };
   for(const st of list){
-    const q1 = st[queryKey] || ((region||'') + ' ' + (st[nameKey]||''));
-    const r = await kakaoFind(q1);
+    const wanted = st[nameKey] || '';
+    const code = nameCode(wanted) || kindCode(st.종류 || st.유형 || '');
+    const q1 = st[queryKey] || ((region||'') + ' ' + wanted);
+    const r = await kakaoFind(q1, code, center);
     if(r.fail){ KAKAO_ERR = r.msg; return false; }
-    let doc = pick(r.docs), mode = 'ok';
+    let doc = pick(r.docs, code, true), mode = 'ok';
+    if(doc && !nameMatch(wanted, doc.name)) doc = null;
     if(!doc){
       const q2 = st[altKey] || ((region||'') + ' ' + (st.종류 || st.유형 || ''));
-      const r2 = await kakaoFind(q2);
+      const r2 = await kakaoFind(q2, code, center);
       if(r2.fail){ KAKAO_ERR = r2.msg; return false; }
-      doc = pick(r2.docs); mode = 'alt';
+      doc = pick(r2.docs, code, true); mode = 'alt';
+      if(doc && !nameMatch(wanted, doc.name) && !nameMatch(st.종류 || '', doc.cat || '')) mode = 'alt';
     }
     if(doc){
       used.push(doc.name);
       st.확인 = mode;
       st[nameKey] = doc.name;
       st.주소 = doc.addr;
+      st.업종 = doc.cat || CATCODE[doc.code] || '';
       st[queryKey] = doc.addr ? (doc.name + ' ' + doc.addr.split(' ').slice(0,2).join(' ')) : doc.name;
     } else {
       st.확인 = 'no';
@@ -684,7 +744,7 @@ function viewDate(){
     + '<label class="lbl">언제</label><input class="inp" type="date" id="pdate" value="'+t.date+'" min="'+today()+'">'
     + '<label class="lbl">어디서</label><input class="inp" id="pregion" value="'+esc(t.region)+'" placeholder="예) 경주">'
     + chipRow('무드', ['감성 · 분위기','액티브','맛집 투어','조용한 산책','실내 데이트'], t.mood, 'pmood')
-    + chipRow('예산', ['5만원 이하','10만원대','20만원 이상'], t.budget, 'pbudget')
+    + chipRow('예산 (둘이 합쳐)', ['5만원 이하','10만원대','20만원 이상','상관없어'], t.budget, 'pbudget')
     + chipRow('이동', ['도보','대중교통','자차'], t.move, 'pmove')
     + '<button class="btn full" data-act="plan" id="planbtn">'+ic('wand',15,'#fff')+' 코스 짜기</button></div>';
   h += '<div id="planout">'+(S.tmp.plan ? planHTML(S.tmp.plan) : '')+'</div>';
@@ -733,7 +793,7 @@ async function runPlan(){
 
   const prompt = '너는 커플 데이트 코스를 짜는 플래너다. 반드시 웹 검색으로 "'+t.region+'" 지역의 실제 영업 중인 장소를 찾은 뒤에 코스를 짜라.\n\n'
     + '[조건]\n날짜: '+fmt(t.date)+' ('+dowKo(t.date)+'요일), 계절: '+season()+'\n지역: '+t.region+'\n날씨: '+wline+'\n'
-    + '컨셉: '+t.mood+' / 예산: '+t.budget+' / 이동: '+t.move+'\n\n'
+    + '컨셉: '+t.mood+' / 예산: 두 사람 합쳐 '+t.budget+' / 이동: '+t.move+'\n\n'
     + '[이번 컨셉 지침 — 가장 중요]\n'+(MOODRULE[t.mood] || '')+'\n'
     + '컨셉이 바뀌면 코스가 완전히 달라져야 한다. 어느 컨셉에나 어울리는 무난한 곳으로 채우지 마라.\n'
     + '중심축 장소가 코스의 절반 이상을 차지해야 하고, 나머지는 그 중심을 살려주는 곁들임이어야 한다.\n'
@@ -767,14 +827,20 @@ async function runPlan(){
     + '- 저녁 이후 일정은 그 시간에 여는 곳으로만 채워라. 밤에 닫는 전시관·공원 매표소 같은 곳을 늦게 배치하지 마라.\n'
     + '- "영업시간"에는 그날 기준 영업시간을, "휴무일"에는 정기 휴무를 적어라. 확인 못 했으면 빈 문자열로 두고 지어내지 마라.\n'
     + '- 카페와 디저트는 식사 사이나 식사 이후에만 배치하라.\n\n'
+    + '[예산 — 두 사람 합계 기준]\n'
+    + '- 예산은 1인이 아니라 두 사람이 함께 쓰는 총액이다.\n'
+    + '- 각 장소의 "예상비용"도 두 사람 몫을 합친 금액으로 적어라. 예: 밥집 4만원(2인).\n'
+    + '- 모든 장소의 비용을 더한 값이 "총예상비용"이고, 이 값이 예산 범위 안에 들어와야 한다.\n'
+    + '- 10만원대라면 합계가 10만~19만원 사이여야 한다. 예산을 크게 밑돌면 더 좋은 곳으로 올려 잡아라.\n\n'
     + '[분량]\n'
     + '- 장소는 5~6곳. 낮부터 저녁까지 이어지는 하루를 채워라.\n'
     + '- 같은 장소를 두 번 넣지 마라. 모든 장소는 서로 달라야 한다.\n'
+    + '- "종류"는 그 장소의 실제 성격을 정확히 적어라. 항구나 해변을 카페로, 공원을 식당으로 적지 마라.\n'
     + '- 각 장소의 "이유"는 두 문장으로. 왜 이 순서인지, 거기서 둘이 뭘 하면 좋은지 구체적으로 써라.\n'
     + '- "리포트"는 네 문장으로. 이 코스의 흐름과 하이라이트를 설명하라.\n\n'
     + '[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},'
-    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","영업시간":"11:00-21:00","휴무일":"월요일","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"2만원"}],'
-    + '"총예상비용":"1인 5만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"네 문장","챙길것":["",""]}';
+    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","영업시간":"11:00-21:00","휴무일":"월요일","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"4만원"}],'
+    + '"총예상비용":"둘이 12만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"네 문장","챙길것":["",""]}';
 
   try{
     let r;
@@ -818,7 +884,7 @@ function planHTML(p){
       + '<div style="flex:1;padding-bottom:16px;border-left:1px solid var(--line);padding-left:14px;margin-left:-8px">'
       + '<div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><div style="font-family:var(--disp);font-size:16.5px">'+esc(s.장소)+'</div>'
       + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.평점?' · ★'+esc(s.평점):'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div>'
-      + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.확인==='alt'?' · 비슷한 곳으로 대체':'')+'</div>':'')
+      + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.업종?' · '+esc(s.업종):'')+(s.확인==='alt'?' · 비슷한 곳으로 대체':'')+'</div>':'')
       + (s.영업시간?'<div style="font-family:var(--mono);font-size:10px;color:var(--dusk);margin-top:3px">영업 '+esc(s.영업시간)+(s.휴무일?' · 휴무 '+esc(s.휴무일):'')+'</div>':'')+'</div>'
       + '<a href="'+naver(s.검색어 || (p.region+' '+s.장소))+'" target="_blank" style="color:var(--naver);flex-shrink:0">'+ic('pin',17)+'</a></div>'
       + '<p class="muted" style="margin-top:6px">'+esc(s.이유||'')+'</p>'
@@ -826,7 +892,7 @@ function planHTML(p){
       + '</div></div>';
   });
   h += '</div></div>';
-  [['총 비용',p.cost],['요즘 뜨는 것',p.trend],['비 오면',p.rainplan],['챙길 것',p.bring]].forEach(x => {
+  [['총 비용 (2인)',p.cost],['요즘 뜨는 것',p.trend],['비 오면',p.rainplan],['챙길 것',p.bring]].forEach(x => {
     if(x[1]) h += '<div style="display:flex;gap:10px;padding:5px 0;border-top:1px solid var(--line)"><span style="font-family:var(--mono);font-size:9.5px;color:var(--glow);width:66px;flex-shrink:0;padding-top:4px">'+x[0]+'</span><span style="font-size:13px;line-height:1.7">'+esc(x[1])+'</span></div>';
   });
   if(p.report) h += '<div style="background:var(--soft);border-radius:14px;padding:14px;margin-top:14px"><span class="eyebrow">총평</span><p style="font-family:var(--disp);font-size:14.5px;line-height:1.9;margin-top:6px">'+esc(p.report)+'</p></div>';
@@ -1047,7 +1113,7 @@ async function runTravelAI(){
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
     if(S.settings.kakao && r.다음여행){
       out.innerHTML = '<p class="hint"><span class="spin">'+ic('compass',13)+'</span> 실제 장소인지 확인 중…</p>';
-      const ok = await verifyStops(r.다음여행, '', '장소', '검색어', '검색어');
+      const ok = await verifyStops(r.다음여행, S.settings.region, '장소', '검색어', '검색어');
       if(ok){ const kept = dedupe(r.다음여행.filter(x => x.확인 !== 'no'), '장소'); if(kept.length) r.다음여행 = kept; }
       else r.kakaoErr = KAKAO_ERR;
     }
@@ -1493,10 +1559,10 @@ document.addEventListener('click', async (e) => {
     const out = $('#aitestout');
     S.settings.kakao = $('#skakao').value.trim(); save('settings');
     out.style.color = 'var(--sub)'; out.textContent = '확인 중…';
-    const r = await kakaoFind('포항 죽도시장');
+    const r = await kakaoFind('포항 죽도시장', '', null);
     if(r.fail){ out.style.color = 'var(--rose)'; out.textContent = '카카오 실패 · ' + r.msg + ' (일반 메뉴에서 Web 도메인에 ' + location.origin + ' 등록했는지 확인)'; }
-    else if(!r.doc){ out.style.color = 'var(--rose)'; out.textContent = '응답은 왔는데 결과가 비었어.'; }
-    else { out.style.color = 'var(--naver)'; out.textContent = '카카오 연결 성공 · ' + r.doc.name; }
+    else if(!r.docs || !r.docs.length){ out.style.color = 'var(--rose)'; out.textContent = '응답은 왔는데 결과가 비었어.'; }
+    else { out.style.color = 'var(--naver)'; out.textContent = '카카오 연결 성공 · ' + r.docs[0].name; }
     return;
   }
   if(a === 'aitest'){
