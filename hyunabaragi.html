@@ -351,9 +351,8 @@ async function kakaoFind(q){
       return { ok:false, fail:true, msg:'HTTP ' + r.status + (extra ? ' · ' + extra : '') };
     }
     const d = await r.json();
-    const doc = (d.documents || [])[0];
-    if(!doc) return { ok:true, doc:null };
-    return { ok:true, doc:{ name:doc.place_name, addr:doc.road_address_name || doc.address_name || '' } };
+    const docs = (d.documents || []).map(x => ({ name:x.place_name, addr:x.road_address_name || x.address_name || '' }));
+    return { ok:true, docs:docs };
   }catch(e){
     return { ok:false, fail:true, msg:'요청 차단됨 (도메인 등록 확인)' };
   }
@@ -361,18 +360,24 @@ async function kakaoFind(q){
 async function verifyStops(list, region, nameKey, queryKey, altKey){
   KAKAO_ERR = '';
   if(!S.settings.kakao) return false;
+  const used = [];
+  const pick = (docs) => {
+    for(const d of (docs || [])) if(used.indexOf(d.name) < 0) return d;
+    return null;
+  };
   for(const st of list){
     const q1 = st[queryKey] || ((region||'') + ' ' + (st[nameKey]||''));
-    let r = await kakaoFind(q1);
+    const r = await kakaoFind(q1);
     if(r.fail){ KAKAO_ERR = r.msg; return false; }
-    let doc = r.doc, mode = 'ok';
+    let doc = pick(r.docs), mode = 'ok';
     if(!doc){
       const q2 = st[altKey] || ((region||'') + ' ' + (st.종류 || st.유형 || ''));
       const r2 = await kakaoFind(q2);
       if(r2.fail){ KAKAO_ERR = r2.msg; return false; }
-      doc = r2.doc; mode = 'alt';
+      doc = pick(r2.docs); mode = 'alt';
     }
     if(doc){
+      used.push(doc.name);
       st.확인 = mode;
       st[nameKey] = doc.name;
       st.주소 = doc.addr;
@@ -382,6 +387,14 @@ async function verifyStops(list, region, nameKey, queryKey, altKey){
     }
   }
   return true;
+}
+function dedupe(list, nameKey){
+  const seen = [];
+  return list.filter(x => {
+    const k = (x[nameKey] || '') + '|' + (x.주소 || '');
+    if(!x[nameKey] || seen.indexOf(k) >= 0) return false;
+    seen.push(k); return true;
+  });
 }
 /* ========================= 재방문 엔진 ========================= */
 function revisit(){
@@ -744,15 +757,23 @@ async function runPlan(){
     + '[가본 곳 (가게 | 종류 | 메뉴 | 별점 | 며칠 전)]\n'+liked+'\n다녀온 여행지: '+been+'\n가보고 싶어하는 곳: '+wish+'\n'
     + '- 싫어한다고 적힌 것은 절대 넣지 마라.\n- 강수확률이 높으면 실내 위주.\n\n'
     + '[식사 시간 — 반드시]\n'
-    + '- 11:30~13:30 구간에는 반드시 점심 식사 장소를 배치하라. 이 시간대에 카페나 전시를 넣지 마라.\n'
-    + '- 코스가 18:00을 넘기면 저녁 식사 장소를 반드시 넣어라.\n'
+    + '- 점심 식사는 13:00 또는 13:30에 시작하도록 고정하라. 특별한 이유가 없으면 이 시간을 벗어나지 마라.\n'
+    + '- 저녁 식사는 18:00 또는 18:30에 시작하도록 고정하라.\n'
+    + '- 두 끼 모두 반드시 코스에 넣어라. 그 시간대에 카페나 전시를 배치하지 마라.\n\n'
+    + '[영업시간 — 반드시 확인하라]\n'
+    + '- 각 장소의 영업시간과 휴무일을 웹 검색으로 확인하라.\n'
+    + '- '+dowKo(t.date)+'요일에 쉬는 곳은 코스에 절대 넣지 마라. 그날 문 여는 곳만 골라라.\n'
+    + '- 배치한 시간이 그 장소의 영업시간 안에 들어가야 한다. 브레이크타임과 라스트오더도 고려하라.\n'
+    + '- 저녁 이후 일정은 그 시간에 여는 곳으로만 채워라. 밤에 닫는 전시관·공원 매표소 같은 곳을 늦게 배치하지 마라.\n'
+    + '- "영업시간"에는 그날 기준 영업시간을, "휴무일"에는 정기 휴무를 적어라. 확인 못 했으면 빈 문자열로 두고 지어내지 마라.\n'
     + '- 카페와 디저트는 식사 사이나 식사 이후에만 배치하라.\n\n'
     + '[분량]\n'
     + '- 장소는 5~6곳. 낮부터 저녁까지 이어지는 하루를 채워라.\n'
+    + '- 같은 장소를 두 번 넣지 마라. 모든 장소는 서로 달라야 한다.\n'
     + '- 각 장소의 "이유"는 두 문장으로. 왜 이 순서인지, 거기서 둘이 뭘 하면 좋은지 구체적으로 써라.\n'
     + '- "리포트"는 네 문장으로. 이 코스의 흐름과 하이라이트를 설명하라.\n\n'
     + '[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},'
-    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"2만원"}],'
+    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","영업시간":"11:00-21:00","휴무일":"월요일","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"2만원"}],'
     + '"총예상비용":"1인 5만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"네 문장","챙길것":["",""]}';
 
   try{
@@ -768,12 +789,13 @@ async function runPlan(){
       btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 실제 장소 확인 중…';
       const ok = await verifyStops(S.tmp.plan.course, t.region, '장소', '검색어', '대체검색어');
       if(ok){
-        const kept = S.tmp.plan.course.filter(x => x.확인 !== 'no');
+        const kept = dedupe(S.tmp.plan.course.filter(x => x.확인 !== 'no'), '장소');
         if(kept.length) S.tmp.plan.course = kept;
       } else {
         S.tmp.plan.kakaoErr = KAKAO_ERR;
       }
     }
+    S.tmp.plan.course = dedupe(S.tmp.plan.course, '장소');
     S.tmp.lastPlaces = (avoid || []).concat((S.tmp.plan.course||[]).map(x => x.장소)).slice(-30);
     out.innerHTML = (warn ? '<p class="hint" style="color:var(--rose);margin-bottom:8px">'+esc(warn)+'</p>' : '') + planHTML(S.tmp.plan);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
@@ -796,7 +818,8 @@ function planHTML(p){
       + '<div style="flex:1;padding-bottom:16px;border-left:1px solid var(--line);padding-left:14px;margin-left:-8px">'
       + '<div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><div style="font-family:var(--disp);font-size:16.5px">'+esc(s.장소)+'</div>'
       + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.평점?' · ★'+esc(s.평점):'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div>'
-      + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.확인==='alt'?' · 비슷한 곳으로 대체':'')+'</div>':'')+'</div>'
+      + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.확인==='alt'?' · 비슷한 곳으로 대체':'')+'</div>':'')
+      + (s.영업시간?'<div style="font-family:var(--mono);font-size:10px;color:var(--dusk);margin-top:3px">영업 '+esc(s.영업시간)+(s.휴무일?' · 휴무 '+esc(s.휴무일):'')+'</div>':'')+'</div>'
       + '<a href="'+naver(s.검색어 || (p.region+' '+s.장소))+'" target="_blank" style="color:var(--naver);flex-shrink:0">'+ic('pin',17)+'</a></div>'
       + '<p class="muted" style="margin-top:6px">'+esc(s.이유||'')+'</p>'
       + '<a href="'+naver(s.대체검색어 || (p.region+' '+(s.종류||'')))+'" target="_blank" class="hint" style="display:inline-block;margin-top:6px;color:var(--sub);border-bottom:1px solid var(--line)">안 나오면 주변으로 검색</a>'
@@ -894,14 +917,14 @@ async function runFoodAI(){
   const btn = $('#aifoodbtn'), out = $('#aifoodout');
   btn.innerHTML = '<span class="spin">'+ic('sparkle',13)+'</span> 분석 중…';
   const hist = S.food.map(f => f.name+' | '+(f.kind||'-')+' | '+f.area+' | '+f.menu+' | 별'+f.score+' | '+fmt(f.date)+' | '+ago(f.date)+'일 전').join('\n') || '기록 없음';
-  const p = '연인의 외식 기록을 분석해서 추천해줘. 오늘은 '+fmt(today())+', 계절 '+season()+', 주 활동 지역 '+S.settings.region+'.\n\n[두 사람 취향]\n'+tasteBrief()+'\n\n[기록] (가게 | 종류 | 지역 | 메뉴 | 별점 | 날짜 | 며칠 전)\n'+hist+'\n\n웹 검색으로 '+S.settings.region+' 지역 요즘 인기 맛집도 찾아본 뒤 답하라.\n\n[규칙]\n- 싫어한다고 적힌 음식은 절대 추천하지 마라.\n- 재방문: 별점 높고 오래된 곳을 "N일 됐으니 슬슬" 식으로 구체적으로.\n- 새로운 곳: 3곳 이상. 취향과 맞되 아직 안 가본 종류로 넓혀줘. 네이버·구글 평점 4.0 이상인 곳만 골라 평점도 적어라.\n- 반드시 실제 상호명을 써라. \"○○거리\", \"지역+업종\" 같은 뭉뚱그린 표현은 금지. 웹 검색으로 확인된 가게만 넣고, 확인 안 되면 다른 가게를 찾아라.\n- 이미 기록에 있는 가게는 새로운 곳에 넣지 마라.\n- 편중: 특정 종류만 먹고 있으면 짚어줘.\n\n[JSON]\n{"취향":"두 문장","편중":"한 문장","재방문":[{"이름":"","이유":""}],"새로운곳":[{"이름":"","지역":"","종류":"","평점":"4.3","이유":"","검색어":""}],"이번주제안":"한 문장"}';
+  const p = '연인의 외식 기록을 분석해서 추천해줘. 오늘은 '+fmt(today())+', 계절 '+season()+', 주 활동 지역 '+S.settings.region+'.\n\n[두 사람 취향]\n'+tasteBrief()+'\n\n[기록] (가게 | 종류 | 지역 | 메뉴 | 별점 | 날짜 | 며칠 전)\n'+hist+'\n\n웹 검색으로 '+S.settings.region+' 지역 요즘 인기 맛집도 찾아본 뒤 답하라.\n\n[규칙]\n- 싫어한다고 적힌 음식은 절대 추천하지 마라.\n- 재방문: 별점 높고 오래된 곳을 "N일 됐으니 슬슬" 식으로 구체적으로.\n- 새로운 곳: 3곳 이상. 취향과 맞되 아직 안 가본 종류로 넓혀줘. 네이버·구글 평점 4.0 이상인 곳만 골라 평점도 적어라.\n- 반드시 실제 상호명을 써라. \"○○거리\", \"지역+업종\" 같은 뭉뚱그린 표현은 금지. 웹 검색으로 확인된 가게만 넣고, 확인 안 되면 다른 가게를 찾아라.\n- 이미 기록에 있는 가게는 새로운 곳에 넣지 마라.\n- 편중: 특정 종류만 먹고 있으면 짚어줘.\n\n[JSON]\n{"취향":"두 문장","편중":"한 문장","재방문":[{"이름":"","이유":""}],"새로운곳":[{"이름":"","지역":"","종류":"","평점":"4.3","영업시간":"","휴무일":"","이유":"","검색어":""}],"이번주제안":"한 문장"}';
   try{
     let r;
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
     if(S.settings.kakao && r.새로운곳){
       out.innerHTML = '<p class="hint"><span class="spin">'+ic('sparkle',13)+'</span> 실제 가게인지 확인 중…</p>';
       const ok = await verifyStops(r.새로운곳, S.settings.region, '이름', '검색어', '검색어');
-      if(ok){ const kept = r.새로운곳.filter(x => x.확인 !== 'no'); if(kept.length) r.새로운곳 = kept; }
+      if(ok){ const kept = dedupe(r.새로운곳.filter(x => x.확인 !== 'no'), '이름'); if(kept.length) r.새로운곳 = kept; }
       else r.kakaoErr = KAKAO_ERR;
     }
     S.tmp.aifood = r; out.innerHTML = foodAIHTML(r);
@@ -1025,7 +1048,7 @@ async function runTravelAI(){
     if(S.settings.kakao && r.다음여행){
       out.innerHTML = '<p class="hint"><span class="spin">'+ic('compass',13)+'</span> 실제 장소인지 확인 중…</p>';
       const ok = await verifyStops(r.다음여행, '', '장소', '검색어', '검색어');
-      if(ok){ const kept = r.다음여행.filter(x => x.확인 !== 'no'); if(kept.length) r.다음여행 = kept; }
+      if(ok){ const kept = dedupe(r.다음여행.filter(x => x.확인 !== 'no'), '장소'); if(kept.length) r.다음여행 = kept; }
       else r.kakaoErr = KAKAO_ERR;
     }
     S.tmp.aitravel = r; out.innerHTML = travelAIHTML(r);
