@@ -144,6 +144,7 @@ const S = {
   travel: LS.get('travel', []),
   days: LS.get('days', {}),
   courses: LS.get('courses', []),
+  recent: LS.get('recent', []),
   cal: { y: new Date().getFullYear(), m: new Date().getMonth() },
   open: null, sheet: null, tmp: {},
 };
@@ -349,6 +350,8 @@ function nameCode(name){
   if(/식당$|맛집|횟집|국밥|칼국수|고깃집|포차|주점|이자카야/.test(n)) return 'FD6';
   return '';
 }
+const FRANCHISE = /스타벅스|투썸|이디야|메가커피|메가엠지시|빽다방|컴포즈|더벤티|파스쿠찌|할리스|엔제리너스|탐앤탐스|커피빈|폴바셋|블루보틀|파리바게|뚜레쥬르|맥도날드|버거킹|롯데리아|맘스터치|KFC|서브웨이|노브랜드버거|교촌|비비큐|BBQ|굽네|네네치킨|처갓집|도미노|피자헛|미스터피자|아웃백|빕스|애슐리|본죽|본도시락|김밥천국|한솥|이삭토스트|공차|설빙|배스킨|던킨|요거프레소|쥬씨|바르다김선생|백종원|새마을식당|홍콩반점|한신포차|역전할머니|매머드/;
+const BADPLACE = /의원|병원|치과|한의원|클리닉|피부과|성형|안과|정형외과|약국|보건소|학원|교습소|부동산|주유소|세차장|은행|사무소|공인중개/;
 function normName(x){ return String(x || '').replace(/[\s\-·().,'"]/g,''); }
 function nameMatch(a, b){
   const x = normName(a), y = normName(b);
@@ -387,6 +390,7 @@ async function kakaoFind(q, code, center){
       .filter(x => x.category_group_code)
       .map(x => ({ name:x.place_name, addr:x.road_address_name || x.address_name || '',
                    code:x.category_group_code, phone:(x.phone||'').trim(),
+                   x:parseFloat(x.x), y:parseFloat(x.y),
                    full:(x.category_name||''), cat:(x.category_name||'').split('>').pop().trim() }));
     return { ok:true, docs:docs };
   }catch(e){
@@ -418,6 +422,8 @@ async function verifyStops(list, region, nameKey, queryKey, altKey){
       if((d.full || '').split('>').length < 3) return false;
     }
     if(/^[가-힣]{1,4}(빌라|아파트|주택|맨션|하우스|타운|빌|사택|기숙사)$/.test(d.name)) return false;
+    if(BADPLACE.test(d.name) || BADPLACE.test(d.full || '')) return false;
+    if(FRANCHISE.test(d.name)) return false;
     return true;
   };
   const pick = (docs, code, strict) => {
@@ -442,14 +448,14 @@ async function verifyStops(list, region, nameKey, queryKey, altKey){
     }
     if(doc){
       used.push(doc.name);
-      if(mode === 'alt'){
-        st.이유 = 'AI가 고른 곳을 지도에서 못 찾아서, 같은 지역·같은 업종의 실제 장소로 바꿨어. 분위기는 직접 확인해줘.';
-        st.평점 = ''; st.영업시간 = ''; st.휴무일 = '';
-      }
+      if(mode === 'alt'){ st.평점 = ''; st.영업시간 = ''; st.휴무일 = ''; }
       st.확인 = mode;
       st[nameKey] = doc.name;
       st.주소 = doc.addr;
       st.업종 = doc.cat || CATCODE[doc.code] || '';
+      st.동네 = (doc.addr || '').split(' ').slice(0,3).pop() || '';
+      st.lat = doc.y; st.lon = doc.x;
+      if(mode === 'alt') st.이유 = (st.동네 ? st.동네 + '의 ' : '') + (st.업종 || '장소') + '. 지도에서 확인한 실제 장소야.';
       st[queryKey] = doc.addr ? (doc.name + ' ' + doc.addr.split(' ').slice(0,2).join(' ')) : doc.name;
     } else {
       st.확인 = 'no';
@@ -464,6 +470,23 @@ function dedupe(list, nameKey){
     if(!x[nameKey] || seen.indexOf(k) >= 0) return false;
     seen.push(k); return true;
   });
+}
+function haversine(a, b){
+  if(!a || !b || !a.lat || !b.lat) return null;
+  const R = 6371, rad = (d) => d * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+  const h = Math.sin(dLat/2)**2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon/2)**2;
+  return R * 2 * Math.asin(Math.sqrt(h));
+}
+function legInfo(a, b, move){
+  const d = haversine(a, b);
+  if(d == null) return null;
+  const km = d * 1.25;
+  const spd = move === '도보' ? 4.5 : move === '대중교통' ? 17 : 26;
+  const min = Math.max(3, Math.round(km / spd * 60));
+  const dist = km < 1 ? Math.round(km * 1000) + 'm' : km.toFixed(1) + 'km';
+  const how = move === '도보' ? '걸어서' : move === '대중교통' ? '대중교통으로' : '차로';
+  return dist + ' · ' + how + ' 약 ' + min + '분';
 }
 /* ========================= 재방문 엔진 ========================= */
 function revisit(){
@@ -751,7 +774,8 @@ function viewDate(){
     + '<p class="lead">날씨 예보 + 요즘 핫플 + 둘의 취향과 기록을 합쳐 코스를 짜고 점수를 매겨.</p>';
   h += '<div class="card">'
     + '<label class="lbl">언제</label><input class="inp" type="date" id="pdate" value="'+t.date+'" min="'+today()+'">'
-    + '<label class="lbl">어디서</label><input class="inp" id="pregion" value="'+esc(t.region)+'" placeholder="예) 경주">'
+    + '<label class="lbl">어디서</label><input class="inp" id="pregion" value="'+esc(t.region)+'" placeholder="예) 포항 죽도동, 서울 성수동">'
+    + '<p class="hint" style="margin:-6px 0 12px">동네까지 적으면 그 근처로 좁혀서 짜줘.</p>'
     + chipRow('무드', ['감성 · 분위기','액티브','맛집 투어','조용한 산책','실내 데이트'], t.mood, 'pmood')
     + chipRow('예산 (둘이 합쳐)', ['5만원 이하','10만원대','20만원 이상','상관없어'], t.budget, 'pbudget')
     + chipRow('이동', ['도보','대중교통','자차'], t.move, 'pmove')
@@ -774,7 +798,7 @@ function chipRow(label, opts, val, name){
 function nextWeekend(){ const d = new Date(); d.setDate(d.getDate() + (((6-d.getDay()+7)%7) || 7)); return iso(d); }
 
 const MOODRULE = {
-  '감성 · 분위기':'분위기 좋은 공간이 중심축이다. 뷰·조명·인테리어가 뛰어난 곳 2곳과 노을 또는 야경 포인트 1곳을 축으로 삼고, 그 분위기에 어울리는 식사 1곳과 이동 중 들를 곳 1곳을 곁들여라.',
+  '감성 · 분위기':'분위기 좋은 공간이 중심축이다. 뷰·조명·인테리어가 뛰어난 개인 운영 공간 2곳과 노을 또는 야경 포인트 1곳을 축으로 삼고, 그에 어울리는 식사를 곁들여라. 패스트푸드·햄버거·분식·프랜차이즈 카페는 이 컨셉에 절대 넣지 마라. 조용하고 사진이 잘 나오며 인테리어로 알려진 곳만 골라라.',
   '액티브':'몸을 쓰는 활동이 중심축이다. 트레킹·자전거·해양레저·클라이밍·체험 중 2곳을 축으로 삼고, 활동 사이에 에너지 채울 식사 1곳과 마무리로 쉴 곳 1곳을 곁들여라. 카페에 오래 앉는 구성은 금지.',
   '맛집 투어':'먹는 것이 중심축이다. 식사 2곳(본식과 후식 또는 시장 먹거리)과 디저트·카페 1곳을 축으로 삼되, 그 사이에 소화시키며 걸을 산책로나 구경거리를 1~2곳 반드시 끼워 넣어라. 식당만 줄줄이 나열한 코스는 실패한 코스다.',
   '조용한 산책':'걷는 것이 중심축이다. 산책로·공원·해안길·수목원 중 2곳을 축으로 삼고, 중간에 앉아 쉴 조용한 카페 1곳과 붐비지 않는 식사 1곳을 곁들여라. 붐비는 관광지는 넣지 마라.',
@@ -783,9 +807,18 @@ const MOODRULE = {
 function avoidList(region){
   const out = [];
   S.courses.forEach(c => { if(c.region === region) (c.course||[]).forEach(x => out.push(x.장소)); });
+  (S.recent || []).forEach(r => { if(r.region === region) out.push(r.name); });
   (S.tmp.lastPlaces || []).forEach(x => out.push(x));
-  return out.filter((v,i,a) => v && a.indexOf(v) === i).slice(0,30);
+  return out.filter((v,i,a) => v && a.indexOf(v) === i).slice(-45);
 }
+const VARY = [
+  '이번에는 지난번과 다른 동네를 중심으로 잡아라.',
+  '이번에는 최근 1년 안에 문을 연 새로운 곳을 우선 넣어라.',
+  '이번에는 관광객보다 현지 사람들이 자주 가는 곳 위주로 잡아라.',
+  '이번에는 규모가 크고 알려진 곳보다 작고 조용한 곳을 우선하라.',
+  '이번에는 평소 잘 안 가볼 법한 외곽이나 골목 쪽을 섞어라.',
+  '이번에는 이동 동선을 지난번과 반대 방향으로 잡아라.',
+];
 async function runPlan(){
   const t = S.tmp.date;
   t.date = $('#pdate').value; t.region = $('#pregion').value;
@@ -809,7 +842,8 @@ async function runPlan(){
     + '같은 종류를 연달아 배치하지 마라. 예를 들어 식당 다음에 바로 식당은 안 된다.\n\n'
     + '[이미 제안했던 코스 — 반복 금지]\n'+(avoid.join(', ')||'없음')+'\n'
     + '위는 지난번에 이미 제안한 곳이다. 그대로 다시 내놓지 마라.\n'
-    + '요청 번호 '+Math.floor(Math.random()*9000+1000)+'. 지난번과 다른 동네·권역을 우선 고려해 매번 다른 코스를 만들어라.\n\n'
+    + '요청 번호 '+Math.floor(Math.random()*9000+1000)+'. '+VARY[Math.floor(Math.random()*VARY.length)]+'\n'
+    + '지난번과 같은 코스를 반복하면 실패한 결과다. 장소가 하나도 겹치지 않게 하라.\n\n'
     + '[재방문할지 새로 갈지 — 네가 판단하라]\n'
     + '- 최근 30일 안에 간 곳은 넣지 마라.\n'
     + '- 60일 이상 지났고 별점 4 이상인 곳은 다시 넣어도 좋다. 오늘 날씨·계절·컨셉에 잘 맞을 때만.\n'
@@ -836,21 +870,31 @@ async function runPlan(){
     + '- 저녁 이후 일정은 그 시간에 여는 곳으로만 채워라. 밤에 닫는 전시관·공원 매표소 같은 곳을 늦게 배치하지 마라.\n'
     + '- "영업시간"에는 그날 기준 영업시간을, "휴무일"에는 정기 휴무를 적어라. 확인 못 했으면 빈 문자열로 두고 지어내지 마라.\n'
     + '- 카페와 디저트는 식사 사이나 식사 이후에만 배치하라.\n\n'
-    + '[예산 — 두 사람 합계 기준]\n'
+    + (t.budget === '상관없어'
+        ? '[예산]\n- 예산은 신경 쓰지 마라. 가격을 이유로 더 좋은 곳을 포기하지 말고, 이 지역에서 낼 수 있는 최고의 코스를 짜라.\n- 비용은 참고용으로만 적어라.\n\n'
+        : '')
+    + (t.budget === '상관없어' ? '' : '[예산 — 두 사람 합계 기준]\n')
     + '- 예산은 1인이 아니라 두 사람이 함께 쓰는 총액이다.\n'
     + '- 각 장소의 "예상비용"도 두 사람 몫을 합친 금액으로 적어라. 예: 밥집 4만원(2인).\n'
     + '- 모든 장소의 비용을 더한 값이 "총예상비용"이고, 이 값이 예산 범위 안에 들어와야 한다.\n'
     + '- 10만원대라면 합계가 10만~19만원 사이여야 한다. 예산을 크게 밑돌면 더 좋은 곳으로 올려 잡아라.\n\n'
+    + '[가게 선정 기준 — 중요]\n'
+    + '- 웹 검색으로 네이버 블로그·인스타그램 언급이 많고 리뷰 수가 충분한 곳을 골라라. 리뷰가 거의 없는 곳은 넣지 마라.\n'
+    + '- 요즘 인기 있고 사람들이 실제로 찾는 곳 위주로. 오래되고 관리가 안 된 곳은 제외하라.\n'
+    + '- 프랜차이즈는 넣지 마라. 스타벅스, 투썸플레이스, 메가커피, 맘스터치 같은 곳은 금지다. 단 그 지점만의 특별한 뷰·건물·한정 메뉴·행사가 있으면 예외로 넣되 그 이유를 밝혀라.\n'
+    + '- 병원, 의원, 학원, 부동산 같은 데이트와 무관한 업소는 절대 넣지 마라.\n'
+    + '- "인기근거"에 왜 이곳이 인기 있는지 한 줄로 적어라. 예: 네이버 리뷰 1200개, 인스타 해시태그 다수.\n\n'
     + '[분량]\n'
-    + '- 장소는 5~6곳. 낮부터 저녁까지 이어지는 하루를 채워라.\n'
+    + '- 장소는 6~7곳. 점심부터 시작해 저녁을 먹고, 저녁 이후 일정을 최소 1곳 더 넣어 마무리하라.\n'
+    + '- 저녁 이후는 야경 명소, 바닷가 산책, 분위기 좋은 술집, 야시장, 심야 카페 중에서 고르라.\n'
     + '- 같은 장소를 두 번 넣지 마라. 모든 장소는 서로 달라야 한다.\n'
     + '- "종류"는 그 장소의 실제 성격을 정확히 적어라. 항구나 해변을 카페로, 공원을 식당으로 적지 마라.\n'
     + '- "이유"에는 검색으로 확인한 사실만 써라. 오션뷰·통창·루프탑·노을 명당 같은 묘사는 실제로 확인했을 때만 쓰고, 아니면 쓰지 마라.\n'
     + '- 바다가 보인다고 쓰려면 그 장소가 실제 해안가에 있어야 한다. 내륙에 있는 곳에 오션뷰라고 쓰지 마라.\n'
-    + '- 각 장소의 "이유"는 두 문장으로. 왜 이 순서인지, 거기서 둘이 뭘 하면 좋은지 구체적으로 써라.\n'
+    + '- 각 장소의 "이유"는 한 문장으로 짧게. 그곳이 어떤 곳이고 왜 이 컨셉에 맞는지만 적어라.\n'
     + '- "리포트"는 네 문장으로. 이 코스의 흐름과 하이라이트를 설명하라.\n\n'
     + '[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},'
-    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","영업시간":"11:00-21:00","휴무일":"월요일","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"4만원"}],'
+    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","동네":"죽도동","평점":"4.4","영업시간":"11:00-21:00","휴무일":"월요일","인기근거":"네이버 리뷰 800개","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"4만원"}],'
     + '"총예상비용":"둘이 12만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"네 문장","챙길것":["",""]}';
 
   try{
@@ -860,7 +904,7 @@ async function runPlan(){
     const sc = r.점수 || {};
     const bd = { 날씨: w ? wScore(w) : 70, 취향: sc.취향||80, 동선: sc.동선||80, 신선함: sc.신선함||80 };
     const total = Math.round(bd.날씨*.3 + bd.취향*.3 + bd.동선*.2 + bd.신선함*.2);
-    S.tmp.plan = { id:uid(), title:r.제목, one:r.한줄, date:t.date, region:t.region, mood:t.mood, w:w, bd:bd, total:total,
+    S.tmp.plan = { id:uid(), title:r.제목, one:r.한줄, date:t.date, region:t.region, mood:t.mood, move:t.move, w:w, bd:bd, total:total,
       course:r.코스||[], cost:r.총예상비용, trend:r.트렌드, rainplan:r.우천대안, report:r.리포트, bring:(r.챙길것||[]).join(', ') };
     if(S.settings.kakao){
       btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 실제 장소 확인 중…';
@@ -873,7 +917,12 @@ async function runPlan(){
       }
     }
     S.tmp.plan.course = dedupe(S.tmp.plan.course, '장소');
-    S.tmp.lastPlaces = (avoid || []).concat((S.tmp.plan.course||[]).map(x => x.장소)).slice(-30);
+    const avoidN = avoid.map(x => normName(x));
+    const fresh = S.tmp.plan.course.filter(x => avoidN.indexOf(normName(x.장소)) < 0);
+    if(fresh.length >= 3) S.tmp.plan.course = fresh;
+    S.tmp.lastPlaces = (avoid || []).concat((S.tmp.plan.course||[]).map(x => x.장소)).slice(-45);
+    (S.tmp.plan.course||[]).forEach(x => { if(x.장소) S.recent.push({ name:x.장소, region:t.region }); });
+    S.recent = S.recent.slice(-120); save('recent');
     out.innerHTML = (warn ? '<p class="hint" style="color:var(--rose);margin-bottom:8px">'+esc(warn)+'</p>' : '') + planHTML(S.tmp.plan);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
   btn.disabled = false; btn.innerHTML = ic('wand',15,'#fff')+' 코스 짜기';
@@ -896,10 +945,12 @@ function planHTML(p){
       + '<div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><div style="font-family:var(--disp);font-size:16.5px">'+esc(s.장소)+'</div>'
       + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.평점?' · ★'+esc(s.평점):'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div>'
       + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.업종?' · '+esc(s.업종):'')+(s.확인==='alt'?' · 대체된 장소':'')+'</div>':'')
+      + (s.인기근거?'<div style="font-size:11px;color:var(--rose);margin-top:3px">'+esc(s.인기근거)+'</div>':'')
       + (s.영업시간?'<div style="font-family:var(--mono);font-size:10px;color:var(--dusk);margin-top:3px">영업 '+esc(s.영업시간)+(s.휴무일?' · 휴무 '+esc(s.휴무일):'')+'</div>':'')+'</div>'
       + '<a href="'+naver(s.검색어 || (p.region+' '+s.장소))+'" target="_blank" style="color:var(--naver);flex-shrink:0">'+ic('pin',17)+'</a></div>'
       + '<p class="muted" style="margin-top:6px">'+esc(s.이유||'')+'</p>'
       + '<a href="'+naver(s.대체검색어 || (p.region+' '+(s.종류||'')))+'" target="_blank" class="hint" style="display:inline-block;margin-top:6px;color:var(--sub);border-bottom:1px solid var(--line)">안 나오면 주변으로 검색</a>'
+      + (leg ? '<div style="font-family:var(--mono);font-size:10px;color:var(--dusk);margin-top:8px">↓ '+esc(leg)+'</div>' : '')
       + '</div></div>';
   });
   h += '</div></div>';
@@ -1179,6 +1230,7 @@ function viewUs(){
 
   h += '<div class="card"><span class="eyebrow">데이터</span>'
     + '<p class="hint" style="margin:8px 0 12px">기록은 이 기기에만 저장돼. 둘이 맞추려면 내보낸 파일을 상대에게 보내고, 상대가 불러오기로 열면 돼.</p>'
+    + '<div class="row" style="margin-bottom:10px"><button class="ghost" data-act="clearrecent">'+ic('rot',13)+' 추천 이력 비우기 ('+(S.recent||[]).length+')</button></div>'
     + '<div class="row"><button class="ghost" data-act="export">'+ic('dl',13)+' 내보내기</button>'
     + '<button class="ghost" data-act="import">'+ic('save',13)+' 불러오기</button></div></div>';
   return h + '</div>';
@@ -1601,6 +1653,7 @@ document.addEventListener('click', async (e) => {
     if([S.settings.me, S.settings.you].indexOf(S.whoami) < 0){ S.whoami = S.settings.me; save('whoami'); }
     toast('저장했어'); render(); return;
   }
+  if(a === 'clearrecent'){ S.recent = []; save('recent'); toast('이력을 비웠어'); render(); return; }
   if(a === 'export'){
     const data = { settings:S.settings, taste:S.taste, food:S.food, travel:S.travel, days:S.days, courses:S.courses, images:IMG };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type:'application/json' }));
