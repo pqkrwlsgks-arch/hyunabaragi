@@ -218,7 +218,7 @@ async function aiGemini(content, opt){
   let model = await geminiModel();
   const run = (mdl, tools) => {
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + mdl + ':generateContent?key=' + encodeURIComponent(S.settings.key);
-    const b = { contents:[{ role:'user', parts:[{ text:(opt.system ? opt.system+'\n\n' : '') + content }] }] };
+    const b = { contents:[{ role:'user', parts:[{ text:(opt.system ? opt.system+'\n\n' : '') + content }] }], generationConfig:{ maxOutputTokens:3000 } };
     if(tools) b.tools = [{ google_search:{} }];
     return fetch(url, { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify(b) }).then(r => r.json());
   };
@@ -240,7 +240,7 @@ async function ai(content, opt){
   opt = opt || {};
   if(!S.settings.key) throw new Error('NOKEY');
   if(S.settings.provider === 'gemini') return aiGemini(content, opt);
-  const body = { model:'claude-sonnet-4-6', max_tokens:1400, messages:[{ role:'user', content: content }] };
+  const body = { model:S.settings.model || 'claude-sonnet-4-6', max_tokens:3000, messages:[{ role:'user', content: content }] };
   if(opt.search) body.tools = [{ type:'web_search_20250305', name:'web_search' }];
   if(opt.system) body.system = opt.system;
   const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -279,41 +279,49 @@ function tasteBrief(){
 
 /* ========================= 날씨 ========================= */
 const WMO = {0:['맑음','sun'],1:['대체로 맑음','sun'],2:['구름 조금','cloud'],3:['흐림','cloud'],45:['안개','cloud'],48:['안개','cloud'],51:['이슬비','rain'],53:['이슬비','rain'],55:['이슬비','rain'],61:['비','rain'],63:['비','rain'],65:['강한 비','rain'],71:['눈','cloud'],73:['눈','cloud'],75:['많은 눈','cloud'],80:['소나기','rain'],81:['소나기','rain'],82:['강한 소나기','rain'],95:['천둥번개','rain'],96:['천둥번개','rain'],99:['천둥번개','rain']};
-const GEO = {
-  '서울':'Seoul','부산':'Busan','대구':'Daegu','인천':'Incheon','광주':'Gwangju','대전':'Daejeon','울산':'Ulsan','세종':'Sejong',
-  '경기':'Suwon','강원':'Chuncheon','충북':'Cheongju','충청북':'Cheongju','충남':'Cheonan','충청남':'Cheonan',
-  '전북':'Jeonju','전라북':'Jeonju','전남':'Yeosu','전라남':'Yeosu','경북':'Andong','경상북':'Andong','경남':'Changwon','경상남':'Changwon',
-  '제주':'Jeju','서귀포':'Seogwipo','포항':'Pohang','경주':'Gyeongju','강릉':'Gangneung','속초':'Sokcho','양양':'Yangyang','평창':'Pyeongchang',
-  '춘천':'Chuncheon','원주':'Wonju','안동':'Andong','전주':'Jeonju','여수':'Yeosu','순천':'Suncheon','목포':'Mokpo','통영':'Tongyeong',
-  '거제':'Geoje','남해':'Namhae','진주':'Jinju','창원':'Changwon','김해':'Gimhae','천안':'Cheonan','청주':'Cheongju','충주':'Chungju',
-  '공주':'Gongju','부여':'Buyeo','태안':'Taean','보령':'Boryeong','군산':'Gunsan','남원':'Namwon','담양':'Damyang','보성':'Boseong',
-  '수원':'Suwon','용인':'Yongin','고양':'Goyang','파주':'Paju','가평':'Gapyeong','양평':'Yangpyeong','남양주':'Namyangju','포천':'Pocheon',
-  '동해':'Donghae','삼척':'Samcheok','정선':'Jeongseon','울릉':'Ulleung','영덕':'Yeongdeok','울진':'Uljin','문경':'Mungyeong','상주':'Sangju',
-  '완도':'Wando','해남':'Haenam','제천':'Jecheon','단양':'Danyang','부안':'Buan','고창':'Gochang','서산':'Seosan',
+const KRGEO = {
+  '서울':[37.5665,126.9780],'부산':[35.1796,129.0756],'대구':[35.8714,128.6014],'인천':[37.4563,126.7052],
+  '광주':[35.1595,126.8526],'대전':[36.3504,127.3845],'울산':[35.5384,129.3114],'세종':[36.4801,127.2890],
+  '수원':[37.2636,127.0286],'용인':[37.2411,127.1776],'고양':[37.6584,126.8320],'파주':[37.7599,126.7800],
+  '가평':[37.8315,127.5095],'양평':[37.4917,127.4876],'남양주':[37.6360,127.2165],'포천':[37.8949,127.2003],
+  '춘천':[37.8813,127.7300],'원주':[37.3422,127.9202],'강릉':[37.7519,128.8761],'속초':[38.2070,128.5918],
+  '양양':[38.0754,128.6190],'평창':[37.3705,128.3901],'정선':[37.3806,128.6608],'동해':[37.5247,129.1143],
+  '삼척':[37.4499,129.1655],'청주':[36.6424,127.4890],'충주':[36.9910,127.9260],'제천':[37.1326,128.1910],
+  '단양':[36.9846,128.3655],'천안':[36.8151,127.1139],'공주':[36.4465,127.1190],'부여':[36.2757,126.9098],
+  '태안':[36.7456,126.2979],'보령':[36.3333,126.6127],'서산':[36.7848,126.4503],'전주':[35.8242,127.1480],
+  '군산':[35.9676,126.7370],'남원':[35.4164,127.3905],'부안':[35.7318,126.7330],'고창':[35.4356,126.7020],
+  '여수':[34.7604,127.6622],'순천':[34.9506,127.4872],'목포':[34.8118,126.3922],'담양':[35.3211,126.9882],
+  '보성':[34.7714,127.0800],'완도':[34.3110,126.7550],'해남':[34.5734,126.5990],'경주':[35.8562,129.2247],
+  '포항':[36.0190,129.3435],'안동':[36.5684,128.7294],'영덕':[36.4150,129.3660],'울진':[36.9930,129.4004],
+  '문경':[36.5865,128.1867],'상주':[36.4109,128.1590],'울릉':[37.4844,130.9057],'창원':[35.2280,128.6811],
+  '진주':[35.1800,128.1076],'통영':[34.8544,128.4331],'거제':[34.8806,128.6212],'남해':[34.8376,127.8925],
+  '김해':[35.2285,128.8894],'하동':[35.0672,127.7514],'제주':[33.4996,126.5312],'서귀포':[33.2541,126.5600],
+  '경기':[37.2636,127.0286],'강원':[37.8813,127.7300],'충북':[36.6424,127.4890],'충남':[36.8151,127.1139],
+  '전북':[35.8242,127.1480],'전남':[34.9506,127.4872],'경북':[36.5684,128.7294],'경남':[35.2280,128.6811],
 };
-function geoCandidates(region){
-  const raw = String(region || '').trim();
-  const base = raw.replace(/\s+/g,'').replace(/(특별자치시|특별자치도|광역시|특별시|자치시|자치도)$/,'').replace(/(시|도|군|구)$/,'');
-  const out = [];
-  const push = (v) => { if(v && out.indexOf(v) < 0) out.push(v); };
-  push(GEO[base]); push(GEO[raw.replace(/\s+/g,'')]);
-  Object.keys(GEO).forEach(k => { if(base.indexOf(k) === 0) push(GEO[k]); });
-  push(raw); push(base);
-  return out;
+function krLookup(region){
+  const raw = String(region || '').replace(/\s+/g,'');
+  if(!raw) return null;
+  const base = raw.replace(/(특별자치시|특별자치도|광역시|특별시|자치시|자치도)/g,'').replace(/(시|도|군|구)$/,'');
+  if(KRGEO[raw]) return KRGEO[raw];
+  if(KRGEO[base]) return KRGEO[base];
+  const keys = Object.keys(KRGEO).sort((a,b) => b.length - a.length);
+  for(const k of keys) if(raw.indexOf(k) >= 0) return KRGEO[k];
+  return null;
 }
 async function geocode(region){
-  for(const q of geoCandidates(region)){
-    try{
-      const g = await fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(q) + '&count=5&language=ko&format=json').then(r => r.json());
-      const hit = (g.results || []).filter(x => x.country_code === 'KR')[0] || (g.results || [])[0];
-      if(hit) return hit;
-    }catch(e){}
-  }
+  const hit = krLookup(region);
+  if(hit) return { latitude:hit[0], longitude:hit[1] };
+  try{
+    const g = await fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(region) + '&count=5&format=json').then(r => r.json());
+    const r0 = (g.results || []).filter(x => x.country_code === 'KR')[0] || (g.results || [])[0];
+    if(r0) return r0;
+  }catch(e){}
   return null;
 }
 async function weather(region, date){
   const p = await geocode(region);
-  if(!p) throw new Error('‘'+region+'’ 지역을 못 찾았어.');
+  if(!p) throw new Error('‘'+region+'’ 날씨를 못 찾았어. 가까운 시·군 이름으로 적어줘.');
   const w = await fetch('https://api.open-meteo.com/v1/forecast?latitude='+p.latitude+'&longitude='+p.longitude+'&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=Asia%2FSeoul&forecast_days=16').then(r => r.json());
   const i = (w.daily && w.daily.time) ? w.daily.time.indexOf(date) : -1;
   if(i < 0) throw new Error('그 날짜는 예보 범위 밖이야. 오늘부터 15일 안으로 골라줘.');
@@ -648,7 +656,7 @@ function avoidList(region){
   const out = [];
   S.courses.forEach(c => { if(c.region === region) (c.course||[]).forEach(x => out.push(x.장소)); });
   (S.tmp.lastPlaces || []).forEach(x => out.push(x));
-  return out.filter((v,i,a) => v && a.indexOf(v) === i).slice(0,25);
+  return out.filter((v,i,a) => v && a.indexOf(v) === i).slice(0,30);
 }
 async function runPlan(){
   const t = S.tmp.date;
@@ -659,8 +667,8 @@ async function runPlan(){
   try{ w = await weather(t.region, t.date); }catch(e){ warn = e.message + ' 날씨 없이 짜볼게.'; }
   btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 요즘 뜨는 곳 검색 중…';
   const wline = w ? (w.place+' '+fmt(t.date)+' 예보: '+w.label+', '+w.tmin+'~'+w.tmax+'도, 강수확률 '+w.rain+'%, 바람 '+w.wind+'km/h') : '날씨 정보 없음';
-  const liked = S.food.slice().sort((a,b)=>b.score-a.score).map(f => f.name+'('+f.menu+'/별'+f.score+')').join(', ') || '없음';
-  const been = S.travel.filter(x=>x.status==='done').map(x=>x.place).join(', ') || '없음';
+  const liked = S.food.slice().sort((a,b)=>b.score-a.score).map(f => f.name+' | '+(f.kind||'-')+' | '+(f.menu||'-')+' | 별'+f.score+' | '+ago(f.date)+'일 전').join('\n') || '없음';
+  const been = S.travel.filter(x=>x.status==='done').map(x=>x.place+(x.date?' ('+ago(x.date)+'일 전)':'')).join(', ') || '없음';
   const wish = S.travel.filter(x=>x.status==='wish').map(x=>x.place).join(', ') || '없음';
   const avoid = avoidList(t.region);
 
@@ -671,19 +679,35 @@ async function runPlan(){
     + '컨셉이 바뀌면 코스가 완전히 달라져야 한다. 어느 컨셉에나 어울리는 무난한 곳으로 채우지 마라.\n'
     + '중심축 장소가 코스의 절반 이상을 차지해야 하고, 나머지는 그 중심을 살려주는 곁들임이어야 한다.\n'
     + '같은 종류를 연달아 배치하지 마라. 예를 들어 식당 다음에 바로 식당은 안 된다.\n\n'
-    + '[겹치지 않게]\n이미 제안했던 곳: '+(avoid.join(', ')||'없음')+'\n위 목록에 있는 장소는 절대 다시 넣지 마라.\n\n'
+    + '[이미 제안했던 코스 — 반복 금지]\n'+(avoid.join(', ')||'없음')+'\n'
+    + '위는 지난번에 이미 제안한 곳이다. 그대로 다시 내놓지 마라.\n'
+    + '요청 번호 '+Math.floor(Math.random()*9000+1000)+'. 지난번과 다른 동네·권역을 우선 고려해 매번 다른 코스를 만들어라.\n\n'
+    + '[재방문할지 새로 갈지 — 네가 판단하라]\n'
+    + '- 최근 30일 안에 간 곳은 넣지 마라.\n'
+    + '- 60일 이상 지났고 별점 4 이상인 곳은 다시 넣어도 좋다. 오늘 날씨·계절·컨셉에 잘 맞을 때만.\n'
+    + '- 다시 넣을 거면 "재방문"을 true로 하고, "이유"에 며칠 만인지와 왜 오늘 다시 좋은지 밝혀라.\n'
+    + '- 코스에서 재방문은 최대 1곳. 나머지는 아직 안 가본 곳으로 채워라.\n'
+    + '- 기록은 입맛을 읽는 자료다. 비슷한 결의 새로운 가게를 찾는 데 주로 써라.\n\n'
     + '[장소 규칙 — 반드시 지켜라]\n'
-    + '- 웹 검색으로 실제 존재와 영업 여부가 확인된 상호만 써라.\n'
-    + '- 확신이 없으면 상호명을 지어내지 말고 "지역명 + 거리/구역/업종"으로 적어라. 예: "포항 죽도시장 물회거리".\n'
-    + '- 음식점과 카페는 네이버·구글 평점이 높은 곳을 우선하고, 5점 만점 평점을 "평점" 항목에 적어라. 모르면 빈 문자열.\n'
-    + '- 검색어: 네이버 지도에 그대로 넣으면 나오는 문자열.\n'
-    + '- 대체검색어: 그 상호가 안 나올 때 쓸 넓은 검색어. 예: "포항 영일대 카페".\n\n'
+    + '- 모든 장소를 실제 상호명으로 특정하라. "○○거리", "○○ 일대", "시장 먹거리" 같이 뭉뚱그린 표현은 절대 쓰지 마라.\n'
+    + '- 웹 검색으로 상호명과 영업 여부를 확인한 곳만 넣어라. 검색해도 확인이 안 되는 후보는 버리고 다른 곳을 찾아라.\n'
+    + '- 음식점과 카페는 네이버·구글 평점이 높은 곳을 우선하고, 5점 만점 평점을 "평점"에 적어라.\n'
+    + '- 검색어: 네이버 지도에 그대로 넣으면 그 가게가 나오는 "지역명 상호명" 문자열.\n'
+    + '- 대체검색어: 지도에서 못 찾을 때를 대비한 넓은 검색어. 예: "포항 영일대 카페".\n\n'
     + '[두 사람 취향]\n'+tasteBrief()+'\n\n'
-    + '[기록]\n좋아했던 맛집(별점 높은 순): '+liked+'\n다녀온 여행지: '+been+'\n가보고 싶어하는 곳: '+wish+'\n'
-    + '- 싫어한다고 적힌 것은 절대 넣지 마라.\n- 강수확률이 높으면 실내 위주.\n- 장소 4~5곳, 시간 순, 밥집 최소 1곳.\n\n'
+    + '[가본 곳 (가게 | 종류 | 메뉴 | 별점 | 며칠 전)]\n'+liked+'\n다녀온 여행지: '+been+'\n가보고 싶어하는 곳: '+wish+'\n'
+    + '- 싫어한다고 적힌 것은 절대 넣지 마라.\n- 강수확률이 높으면 실내 위주.\n\n'
+    + '[식사 시간 — 반드시]\n'
+    + '- 11:30~13:30 구간에는 반드시 점심 식사 장소를 배치하라. 이 시간대에 카페나 전시를 넣지 마라.\n'
+    + '- 코스가 18:00을 넘기면 저녁 식사 장소를 반드시 넣어라.\n'
+    + '- 카페와 디저트는 식사 사이나 식사 이후에만 배치하라.\n\n'
+    + '[분량]\n'
+    + '- 장소는 5~6곳. 낮부터 저녁까지 이어지는 하루를 채워라.\n'
+    + '- 각 장소의 "이유"는 두 문장으로. 왜 이 순서인지, 거기서 둘이 뭘 하면 좋은지 구체적으로 써라.\n'
+    + '- "리포트"는 네 문장으로. 이 코스의 흐름과 하이라이트를 설명하라.\n\n'
     + '[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},'
-    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","이유":"한 문장","검색어":"","대체검색어":"","예상비용":"2만원"}],'
-    + '"총예상비용":"1인 5만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"3문장 이내","챙길것":["",""]}';
+    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"2만원"}],'
+    + '"총예상비용":"1인 5만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"네 문장","챙길것":["",""]}';
 
   try{
     let r;
@@ -811,7 +835,7 @@ async function runFoodAI(){
   const btn = $('#aifoodbtn'), out = $('#aifoodout');
   btn.innerHTML = '<span class="spin">'+ic('sparkle',13)+'</span> 분석 중…';
   const hist = S.food.map(f => f.name+' | '+(f.kind||'-')+' | '+f.area+' | '+f.menu+' | 별'+f.score+' | '+fmt(f.date)+' | '+ago(f.date)+'일 전').join('\n') || '기록 없음';
-  const p = '연인의 외식 기록을 분석해서 추천해줘. 오늘은 '+fmt(today())+', 계절 '+season()+', 주 활동 지역 '+S.settings.region+'.\n\n[두 사람 취향]\n'+tasteBrief()+'\n\n[기록] (가게 | 종류 | 지역 | 메뉴 | 별점 | 날짜 | 며칠 전)\n'+hist+'\n\n웹 검색으로 '+S.settings.region+' 지역 요즘 인기 맛집도 찾아본 뒤 답하라.\n\n[규칙]\n- 싫어한다고 적힌 음식은 절대 추천하지 마라.\n- 재방문: 별점 높고 오래된 곳을 "N일 됐으니 슬슬" 식으로 구체적으로.\n- 새로운 곳: 취향과 맞되 아직 안 가본 종류로 넓혀줘. 네이버·구글 평점 4.0 이상인 곳만 골라 평점도 함께 적어라.\n- 실제 영업 중인 상호만. 확신 없으면 상호 대신 \"지역 + 업종\"으로 적어라.\n- 편중: 특정 종류만 먹고 있으면 짚어줘.\n\n[JSON]\n{"취향":"두 문장","편중":"한 문장","재방문":[{"이름":"","이유":""}],"새로운곳":[{"이름":"","지역":"","종류":"","평점":"4.3","이유":"","검색어":""}],"이번주제안":"한 문장"}';
+  const p = '연인의 외식 기록을 분석해서 추천해줘. 오늘은 '+fmt(today())+', 계절 '+season()+', 주 활동 지역 '+S.settings.region+'.\n\n[두 사람 취향]\n'+tasteBrief()+'\n\n[기록] (가게 | 종류 | 지역 | 메뉴 | 별점 | 날짜 | 며칠 전)\n'+hist+'\n\n웹 검색으로 '+S.settings.region+' 지역 요즘 인기 맛집도 찾아본 뒤 답하라.\n\n[규칙]\n- 싫어한다고 적힌 음식은 절대 추천하지 마라.\n- 재방문: 별점 높고 오래된 곳을 "N일 됐으니 슬슬" 식으로 구체적으로.\n- 새로운 곳: 3곳 이상. 취향과 맞되 아직 안 가본 종류로 넓혀줘. 네이버·구글 평점 4.0 이상인 곳만 골라 평점도 적어라.\n- 반드시 실제 상호명을 써라. \"○○거리\", \"지역+업종\" 같은 뭉뚱그린 표현은 금지. 웹 검색으로 확인된 가게만 넣고, 확인 안 되면 다른 가게를 찾아라.\n- 이미 기록에 있는 가게는 새로운 곳에 넣지 마라.\n- 편중: 특정 종류만 먹고 있으면 짚어줘.\n\n[JSON]\n{"취향":"두 문장","편중":"한 문장","재방문":[{"이름":"","이유":""}],"새로운곳":[{"이름":"","지역":"","종류":"","평점":"4.3","이유":"","검색어":""}],"이번주제안":"한 문장"}';
   try{
     let r;
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
