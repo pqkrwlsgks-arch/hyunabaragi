@@ -165,19 +165,27 @@ const season = () => { const m = new Date().getMonth()+1; return (m<=2||m===12)?
 const naver = (q) => 'https://map.naver.com/p/search/'+encodeURIComponent(q);
 function openNaver(q){
   if(!q || !q.trim()){ toast('검색할 장소가 없어'); return; }
-  const web = naver(q);
   const app = 'nmap://search?query=' + encodeURIComponent(q) + '&appname=' + encodeURIComponent(location.hostname || 'hyunabaragi');
-  let gone = false;
-  const bail = () => { gone = true; };
-  window.addEventListener('pagehide', bail, { once:true });
-  window.addEventListener('blur', bail, { once:true });
-  const t = setTimeout(() => {
-    window.removeEventListener('pagehide', bail);
-    window.removeEventListener('blur', bail);
-    if(!gone && !document.hidden) window.open(web, '_blank');
-  }, 900);
-  try{ window.location.href = app; }
-  catch(e){ clearTimeout(t); window.open(web, '_blank'); }
+  if(S.settings.mapweb === false || S.settings.mapweb === undefined){
+    window.location.href = app;
+    return;
+  }
+  const web = naver(q);
+  let left = false;
+  const mark = () => { left = true; };
+  const started = Date.now();
+  window.addEventListener('pagehide', mark, { once:true });
+  window.addEventListener('blur', mark, { once:true });
+  document.addEventListener('visibilitychange', mark, { once:true });
+  setTimeout(() => {
+    window.removeEventListener('pagehide', mark);
+    window.removeEventListener('blur', mark);
+    document.removeEventListener('visibilitychange', mark);
+    const drift = Date.now() - started;
+    if(left || document.hidden || drift > 2600) return;
+    window.open(web, '_blank');
+  }, 1600);
+  window.location.href = app;
 }
 document.addEventListener('click', (e) => {
   const a = e.target.closest('a[href^="https://map.naver.com"]');
@@ -193,22 +201,39 @@ function toast(msg){
 }
 
 /* ========================= AI ========================= */
+async function geminiModel(){
+  if(S.settings.model) return S.settings.model;
+  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(S.settings.key)).then(x => x.json());
+  if(r.error) throw new Error('Gemini: ' + (r.error.message || '키 확인 실패'));
+  const ok = (r.models || [])
+    .filter(m => (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0)
+    .map(m => String(m.name || '').replace('models/',''))
+    .filter(n => n && !/embedding|aqa|tts|image|live|vision/i.test(n));
+  const pick = ok.filter(n => /flash/i.test(n) && !/thinking/i.test(n))[0] || ok.filter(n => /flash/i.test(n))[0] || ok[0];
+  if(!pick) throw new Error('Gemini: 쓸 수 있는 모델이 없어');
+  S.settings.model = pick; save('settings');
+  return pick;
+}
 async function aiGemini(content, opt){
-  const model = S.settings.model || 'gemini-flash-latest';
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(S.settings.key);
-  const mk = (tools) => {
+  let model = await geminiModel();
+  const run = (mdl, tools) => {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + mdl + ':generateContent?key=' + encodeURIComponent(S.settings.key);
     const b = { contents:[{ role:'user', parts:[{ text:(opt.system ? opt.system+'\n\n' : '') + content }] }] };
     if(tools) b.tools = [{ google_search:{} }];
-    return b;
+    return fetch(url, { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify(b) }).then(r => r.json());
   };
-  const send = (tools) => fetch(url, { method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify(mk(tools)) }).then(r => r.json());
-  let d = await send(!!opt.search);
-  if(d.error && opt.search) d = await send(false);
-  if(d.error) throw new Error(d.error.message || 'Gemini 오류');
-  const cand = (d.candidates || [])[0] || {};
-  const parts = (cand.content || {}).parts || [];
-  const txt = parts.map(p => p.text || '').filter(Boolean).join('\n');
-  if(!txt) throw new Error('응답이 비어 있어');
+  let d = await run(model, !!opt.search);
+  if(d.error && opt.search) d = await run(model, false);
+  if(d.error && /not found|not supported|unsupported|404/i.test(d.error.message || '')){
+    S.settings.model = ''; save('settings');
+    model = await geminiModel();
+    d = await run(model, false);
+  }
+  if(d.error) throw new Error('Gemini: ' + (d.error.message || '오류'));
+  const c = (d.candidates || [])[0] || {};
+  const parts = (c.content || {}).parts || [];
+  const txt = parts.map(x => x.text || '').filter(Boolean).join('\n');
+  if(!txt) throw new Error('Gemini가 빈 응답을 보냈어 (' + (c.finishReason || '이유 없음') + ')');
   return txt;
 }
 async function ai(content, opt){
@@ -236,7 +261,11 @@ async function aiJSON(content, opt){
 }
 function aiErr(e){
   if(e && e.message === 'NOKEY'){ toast('우리 탭에서 API 키를 먼저 넣어줘'); return '우리 탭 > 설정에서 API 키를 넣으면 AI 기능이 켜져.'; }
-  return 'AI 응답을 못 가져왔어. 잠시 뒤 다시 눌러줘.';
+  const m = (e && e.message) ? String(e.message) : '';
+  if(/API key not valid|API_KEY_INVALID/i.test(m)) return 'API 키가 올바르지 않아. 우리 탭에서 다시 확인해줘.';
+  if(/quota|RESOURCE_EXHAUSTED|429/i.test(m)) return '오늘 무료 사용량을 다 썼어. 내일 다시 되거나, 다른 모델로 바꿔봐.';
+  if(/JSON|Unexpected token/i.test(m)) return 'AI가 형식을 지키지 않았어. 한 번 더 눌러줘.';
+  return m ? m.slice(0, 220) : 'AI 응답을 못 가져왔어. 잠시 뒤 다시 눌러줘.';
 }
 function tasteBrief(){
   const out = [];
@@ -312,34 +341,56 @@ async function savePhoto(key, id, n){
     toast('내려받았어');
   }catch(e){ if(e && e.name !== 'AbortError') toast('저장하지 못했어'); }
 }
-function showPhotoView(key, id){
-  const rec = S.days[key];
-  const list = (rec && rec.photos) ? rec.photos.filter(p => IMG[p]) : [id];
-  let i = Math.max(0, list.indexOf(id));
+function showPhotoView(key, id, scope){
+  let items;
+  if(scope === 'all'){
+    items = allPhotos().filter(p => IMG[p.id]).map(p => ({ id:p.id, day:p.day }));
+  } else {
+    const rec = S.days[key];
+    const arr = (rec && rec.photos) ? rec.photos : [id];
+    items = arr.filter(p => IMG[p]).map(p => ({ id:p, day:key }));
+  }
+  if(!items.length) items = [{ id:id, day:key }];
+  let i = items.map(x => x.id).indexOf(id);
+  if(i < 0) i = 0;
+
   const el = document.createElement('div');
-  el.style.cssText = 'position:fixed;inset:0;z-index:85;background:rgba(34,20,28,.95);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px';
+  el.style.cssText = 'position:fixed;inset:0;z-index:85;background:rgba(34,20,28,.96);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px';
+  const arrow = (dir) => '<button id="pv'+dir+'" style="position:absolute;'+(dir==='p'?'left:6px':'right:6px')+';top:50%;transform:translateY(-50%);width:46px;height:46px;border-radius:23px;background:rgba(255,255,255,.16);color:#fff;display:flex;align-items:center;justify-content:center">'
+    + '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+(dir==='p'?I.back:I.chev)+'</svg></button>';
   const paint = () => {
-    el.innerHTML = '<img id="pvi" src="'+IMG[list[i]]+'" alt="" style="max-width:100%;max-height:74vh;border-radius:16px;display:block">'
-      + '<div style="font-family:var(--mono);font-size:11px;color:rgba(255,255,255,.7);margin-top:14px">'+fmt(key)+' · '+(i+1)+' / '+list.length+'</div>'
+    const cur = items[i];
+    el.innerHTML = (items.length > 1 ? arrow('p') + arrow('n') : '')
+      + '<img id="pvi" src="'+IMG[cur.id]+'" alt="" style="max-width:88%;max-height:70vh;border-radius:16px;display:block">'
+      + '<div style="font-family:var(--mono);font-size:11px;color:rgba(255,255,255,.75);margin-top:14px">'+fmt(cur.day)+' · '+(i+1)+' / '+items.length+'</div>'
       + '<div style="display:flex;gap:10px;margin-top:16px">'
-      + (list.length>1 ? '<button id="pvp" style="border:1px solid rgba(255,255,255,.4);color:#fff;padding:10px 16px;border-radius:12px;font-size:13px">이전</button>' : '')
-      + (list.length>1 ? '<button id="pvn" style="border:1px solid rgba(255,255,255,.4);color:#fff;padding:10px 16px;border-radius:12px;font-size:13px">다음</button>' : '')
+      + '<button id="pvo" style="border:1px solid rgba(255,255,255,.4);color:#fff;padding:10px 16px;border-radius:12px;font-size:13px">그날 기록</button>'
       + '<button id="pvs" style="background:rgba(255,255,255,.12);color:#FFD9A0;padding:10px 16px;border-radius:12px;font-size:13px">저장</button>'
       + '<button id="pvd" style="background:rgba(255,255,255,.12);color:#FF9EB4;padding:10px 16px;border-radius:12px;font-size:13px">지우기</button>'
       + '<button id="pvc" style="background:#fff;color:var(--ink);padding:10px 18px;border-radius:12px;font-size:13px;font-weight:700">닫기</button></div>';
     el.querySelector('#pvc').onclick = () => el.remove();
-    el.querySelector('#pvs').onclick = () => savePhoto(key, list[i], i+1);
-    const pp = el.querySelector('#pvp'), pn = el.querySelector('#pvn');
-    if(pp) pp.onclick = () => { i = (i-1+list.length)%list.length; paint(); };
-    if(pn) pn.onclick = () => { i = (i+1)%list.length; paint(); };
+    el.querySelector('#pvo').onclick = () => { el.remove(); S.tab = 'calendar'; S.open = cur.day; window.__sy = 0; render(); };
+    el.querySelector('#pvs').onclick = () => savePhoto(cur.day, cur.id, i+1);
     el.querySelector('#pvd').onclick = async () => {
-      const pid = list[i];
-      if(rec){ rec.photos = rec.photos.filter(x => x !== pid); save('days'); }
-      await imgDel(pid); delete IMG[pid];
-      list.splice(i,1);
-      if(!list.length){ el.remove(); render(); return; }
-      i = i % list.length; paint(); render();
+      const rec = S.days[cur.day];
+      if(rec){ rec.photos = (rec.photos||[]).filter(x => x !== cur.id); if(rec.cover === cur.id) delete rec.cover; save('days'); }
+      await imgDel(cur.id); delete IMG[cur.id];
+      items.splice(i,1);
+      if(!items.length){ el.remove(); render(); return; }
+      i = i % items.length; paint(); render();
     };
+    const pp = el.querySelector('#pvp'), pn = el.querySelector('#pvn');
+    if(pp) pp.onclick = () => { i = (i-1+items.length)%items.length; paint(); };
+    if(pn) pn.onclick = () => { i = (i+1)%items.length; paint(); };
+    const im = el.querySelector('#pvi');
+    let x0 = null;
+    im.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive:true });
+    im.addEventListener('touchend', e => {
+      if(x0 === null || items.length < 2) return;
+      const dx = e.changedTouches[0].clientX - x0;
+      if(Math.abs(dx) > 55){ i = (i + (dx < 0 ? 1 : -1) + items.length) % items.length; paint(); }
+      x0 = null;
+    }, { passive:true });
   };
   paint();
   el.addEventListener('click', e => { if(e.target === el) el.remove(); });
@@ -385,7 +436,6 @@ function viewHome(){
   const dd = S.settings.start ? dbet(S.settings.start, today())+1 : 0;
   const rv = revisit();
   const dayKeys = Object.keys(S.days).sort().reverse();
-  const recent = dayKeys.slice(0,3);
 
   let h = '<div style="display:flex;justify-content:flex-end;padding-top:14px"><button data-act="settings" style="color:var(--sub);padding:4px">'+ic('gear',18)+'</button></div>';
   h += heroHTML(dd > 0 ? dd : 0);
@@ -396,7 +446,7 @@ function viewHome(){
   if(pics.length){
     h += '<div class="card"><span class="eyebrow">우리 사진</span><div style="display:flex;gap:8px;overflow-x:auto;margin-top:10px;padding-bottom:4px">';
     pics.forEach(p => {
-      h += '<button data-act="openday" data-v="'+p.day+'" style="flex:0 0 auto"><img src="'+(IMG[p.id]||'')+'" alt="" style="width:88px;height:88px;object-fit:cover;border-radius:14px;display:block"></button>';
+      h += '<button data-act="viewall" data-v="'+p.day+'|'+p.id+'" style="flex:0 0 auto"><img src="'+(IMG[p.id]||'')+'" alt="" style="width:88px;height:88px;object-fit:cover;border-radius:14px;display:block"></button>';
     });
     h += '</div></div>';
   }
@@ -405,16 +455,6 @@ function viewHome(){
     h += '<div class="card"><div class="row" style="gap:6px">'+ic('rot',13,'var(--glow)')+'<span class="eyebrow">슬슬 다시 갈 때</span></div><div style="margin-top:10px">';
     rv.slice(0,3).forEach(r => {
       h += '<div class="row" style="justify-content:space-between;padding:6px 0"><span style="font-size:14px">'+esc(r.name)+' <span style="color:var(--sub);font-size:11.5px">· '+r.days+'일 전</span></span><a class="ghost nv" href="'+naver(r.area+' '+r.name)+'" target="_blank" style="padding:6px 9px">'+ic('pin',14)+'</a></div>';
-    });
-    h += '</div></div>';
-  }
-
-  if(recent.length){
-    h += '<div class="card"><span class="eyebrow">최근 기록</span><div style="margin-top:10px">';
-    recent.forEach(k => {
-      const d = S.days[k];
-      const txt = (d.text||'').slice(0,42) || '사진만 있는 날';
-      h += '<button data-act="openday" data-v="'+k+'" style="display:block;width:100%;text-align:left;padding:7px 0;border-bottom:1px solid var(--line)"><span style="font-family:var(--mono);font-size:10px;color:var(--glow)">'+fmt(k)+' ('+dowKo(k)+')</span><span style="display:block;font-size:13.5px;margin-top:3px">'+esc(txt)+'</span></button>';
     });
     h += '</div></div>';
   }
@@ -454,37 +494,59 @@ function viewCalendar(){
 
 function viewDay(key){
   const rec = S.days[key] || { photos:[], text:'', title:'', score:0 };
+  const cover = (rec.cover && rec.photos.indexOf(rec.cover) >= 0) ? rec.cover : rec.photos[0];
+  const rest = rec.photos.filter(p => p !== cover);
   let h = '<div class="sw" id="dayview" style="padding-top:18px">';
-  h += '<div class="row" style="justify-content:space-between;margin-bottom:4px">'
+  h += '<div class="row" style="justify-content:space-between;margin-bottom:12px">'
     + '<button data-act="go" data-v="calendar" style="color:var(--sub);display:flex;align-items:center;gap:4px;font-size:13px">'+ic('back',16)+' 캘린더</button>'
     + '<span style="font-family:var(--mono);font-size:10px;color:var(--glow)">'+fmt(key)+' ('+dowKo(key)+')</span></div>';
 
-  h += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:10px 0 8px">';
-  for(let i=0;i<5;i++){
-    const pid = rec.photos[i];
-    if(pid && IMG[pid]) h += '<button class="photoslot" style="border-radius:10px;border-style:solid" data-act="viewphoto" data-v="'+key+'|'+pid+'"><img src="'+IMG[pid]+'" alt=""></button>';
-    else h += '<button class="photoslot" style="border-radius:10px" data-act="addphoto" data-v="'+key+'">'+ic('cam',15)+'</button>';
+  h += '<div style="display:flex;gap:10px;align-items:stretch;margin-bottom:16px">';
+  h += '<div style="flex:0 0 44%">';
+  if(cover && IMG[cover]){
+    h += '<button data-act="viewphoto" data-v="'+key+'|'+cover+'" style="display:block;width:100%;height:252px;border-radius:16px;overflow:hidden;border:1px solid var(--line);position:relative">'
+      + '<img src="'+IMG[cover]+'" alt="" style="width:100%;height:100%;object-fit:cover;display:block">'
+      + '<span style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(180deg,rgba(0,0,0,0),rgba(70,35,25,.6));color:#fff;font-size:9.5px;font-family:var(--mono);padding:14px 0 5px">대표 사진</span></button>';
+  } else {
+    h += '<button data-act="addphoto" data-v="'+key+'" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;width:100%;height:252px;border-radius:16px;border:1px dashed var(--line);background:var(--soft);color:var(--sub);font-size:12px">'
+      + ic('cam',24) + '<span>대표 사진</span></button>';
   }
-  h += '</div><p class="hint" style="margin-bottom:16px">빈 칸을 눌러 사진을 넣고, 올린 사진을 누르면 크게 볼 수 있어.</p>';
+  h += '</div>';
+  h += '<div style="flex:1;min-width:0;display:flex;flex-direction:column">'
+    + '<input class="inp" id="dtitle" style="margin:0 0 7px;padding:9px 11px;font-size:13px" value="'+esc(rec.title)+'" placeholder="제목">'
+    + '<textarea class="inp" id="dtext" style="flex:1;margin:0;min-height:0;font-size:13px;padding:10px;line-height:1.7" placeholder="뭘 했는지, 코스는 어땠는지">'+esc(rec.text)+'</textarea>'
+    + '<div class="row" style="margin-top:8px;gap:8px;flex-wrap:nowrap;align-items:center">'
+    + '<button class="mic" id="micbtn" data-act="mic" style="width:40px;height:40px">'+ic('mic',18)+'</button>'
+    + '<span class="hint" id="micstate" style="font-size:10.5px">눌러서 말해도 돼</span></div>'
+    + '</div></div>';
 
-  h += '<label class="lbl">제목</label><input class="inp" id="dtitle" value="'+esc(rec.title)+'" placeholder="그날을 한마디로">';
+  h += '<div class="row" style="justify-content:space-between;margin-bottom:8px"><span class="lbl" style="margin:0">사진</span>'
+    + '<span class="hint" style="font-size:10.5px">눌러서 대표 사진으로 바꾸기</span></div>';
+  h += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:18px">';
+  const slots = (cover ? [cover] : []).concat(rest);
+  for(let n=0;n<5;n++){
+    const pid = slots[n];
+    if(pid && IMG[pid]){
+      const on = pid === cover;
+      h += '<button class="photoslot" style="border-radius:10px;border-style:solid;border-color:'+(on?'var(--glow)':'var(--line)')+';border-width:'+(on?'2px':'1px')+'" data-act="setcover" data-v="'+key+'|'+pid+'"><img src="'+IMG[pid]+'" alt="">'
+        + (on ? '<span style="position:absolute;top:3px;left:3px;width:7px;height:7px;border-radius:4px;background:var(--glow)"></span>' : '') + '</button>';
+    } else {
+      h += '<button class="photoslot" style="border-radius:10px" data-act="addphoto" data-v="'+key+'">'+ic('plus',15)+'</button>';
+    }
+  }
+  h += '</div>';
 
-  h += '<div class="row" style="justify-content:space-between;align-items:flex-end;margin-bottom:6px"><label class="lbl" style="margin:0">그날의 기록</label>'
-    + '<span class="hint" id="micstate"></span></div>';
-  h += '<div class="row" style="align-items:flex-start;gap:10px">'
-    + '<textarea class="inp" id="dtext" style="flex:1;margin:0" placeholder="뭘 했는지, 코스는 어땠는지 적어줘">'+esc(rec.text)+'</textarea>'
-    + '<button class="mic" id="micbtn" data-act="mic">'+ic('mic',20)+'</button></div>';
+  h += '<div class="card" style="padding:14px 16px"><div class="row" style="justify-content:space-between;align-items:center">'
+    + '<span class="lbl" style="margin:0">그날 별점</span><span class="stars row" style="gap:5px">';
+  for(let n=1;n<=5;n++) h += '<button data-act="dscore" data-v="'+key+'|'+n+'">'+ic('star',22, n<=rec.score?'var(--sun)':'var(--line)', n<=rec.score?'var(--sun)':'none')+'</button>';
+  h += '</span></div></div>';
 
-  h += '<div class="row" style="margin-top:12px"><span class="lbl" style="margin:0">그날 별점</span><span class="stars row" style="gap:4px">';
-  for(let n=1;n<=5;n++) h += '<button data-act="dscore" data-v="'+key+'|'+n+'">'+ic('star',20, n<=rec.score?'var(--sun)':'var(--line)', n<=rec.score?'var(--sun)':'none')+'</button>';
-  h += '</span></div>';
-
-  h += '<div class="row" style="margin-top:16px">'
+  h += '<div class="row" style="margin-top:4px">'
     + '<button class="btn" data-act="saveday" data-v="'+key+'">'+ic('save',15,'#fff')+' 저장</button>'
     + '<button class="ghost hot" data-act="tidy" data-v="'+key+'">'+ic('sparkle',13)+' AI로 다듬기</button>'
     + (S.days[key] ? '<button class="ghost" data-act="delday" data-v="'+key+'">'+ic('trash',13)+'</button>' : '') + '</div>';
   h += '<div id="tidyout"></div>';
-  h += '<p class="hint" style="margin-top:18px">화면을 왼쪽에서 오른쪽으로 밀면 캘린더로 돌아가.</p></div>';
+  h += '<p class="hint" style="margin-top:16px">큰 사진을 누르면 전체화면으로 열려. 화면을 왼쪽에서 오른쪽으로 밀면 캘린더로 돌아가.</p></div>';
   return h;
 }
 
@@ -543,6 +605,19 @@ function chipRow(label, opts, val, name){
 }
 function nextWeekend(){ const d = new Date(); d.setDate(d.getDate() + (((6-d.getDay()+7)%7) || 7)); return iso(d); }
 
+const MOODRULE = {
+  '감성 · 분위기':'뷰·조명·인테리어가 좋은 곳 위주. 노을이나 야경을 볼 수 있는 시간대를 반드시 코스에 포함. 조용하고 사진이 잘 나오는 곳.',
+  '액티브':'몸을 쓰는 활동을 2개 이상 넣어라. 트레킹·자전거·해양레저·체험공방 같은 것. 카페에 오래 앉는 코스는 넣지 마라.',
+  '맛집 투어':'먹는 곳을 3곳 이상 넣어라. 본식·디저트·야식 또는 시장 먹거리로 구성. 평점 높은 집 위주.',
+  '조용한 산책':'걷기 좋은 길·공원·해안길·수목원 중심. 이동은 짧게, 한 곳에 머무는 시간을 길게. 붐비는 관광지는 빼라.',
+  '실내 데이트':'모든 장소를 실내로만 구성. 전시·공방·서점·영화·실내스포츠·카페. 비가 와도 그대로 진행되는 코스.',
+};
+function avoidList(region){
+  const out = [];
+  S.courses.forEach(c => { if(c.region === region) (c.course||[]).forEach(x => out.push(x.장소)); });
+  (S.tmp.lastPlaces || []).forEach(x => out.push(x));
+  return out.filter((v,i,a) => v && a.indexOf(v) === i).slice(0,25);
+}
 async function runPlan(){
   const t = S.tmp.date;
   t.date = $('#pdate').value; t.region = $('#pregion').value;
@@ -552,10 +627,30 @@ async function runPlan(){
   try{ w = await weather(t.region, t.date); }catch(e){ warn = e.message + ' 날씨 없이 짜볼게.'; }
   btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 요즘 뜨는 곳 검색 중…';
   const wline = w ? (w.place+' '+fmt(t.date)+' 예보: '+w.label+', '+w.tmin+'~'+w.tmax+'도, 강수확률 '+w.rain+'%, 바람 '+w.wind+'km/h') : '날씨 정보 없음';
-  const liked = S.food.map(f => f.name+'('+f.menu+'/별'+f.score+')').join(', ') || '없음';
+  const liked = S.food.slice().sort((a,b)=>b.score-a.score).map(f => f.name+'('+f.menu+'/별'+f.score+')').join(', ') || '없음';
   const been = S.travel.filter(x=>x.status==='done').map(x=>x.place).join(', ') || '없음';
   const wish = S.travel.filter(x=>x.status==='wish').map(x=>x.place).join(', ') || '없음';
-  const prompt = '너는 커플 데이트 코스를 짜는 플래너다. 먼저 웹 검색으로 "'+t.region+'" 지역의 최근 인기 장소, 신상 카페, 지금 열리는 전시·팝업·축제를 찾아본 뒤 코스를 짜라.\n\n[조건]\n날짜: '+fmt(t.date)+' ('+dowKo(t.date)+'요일), 계절: '+season()+'\n지역: '+t.region+'\n날씨: '+wline+'\n무드: '+t.mood+' / 예산: '+t.budget+' / 이동: '+t.move+'\n\n[두 사람 취향]\n'+tasteBrief()+'\n\n[기록]\n좋아했던 맛집: '+liked+'\n다녀온 여행지: '+been+'\n가보고 싶어하는 곳: '+wish+'\n\n[규칙]\n- 싫어한다고 적힌 것은 절대 넣지 마라.\n- 강수확률이 높으면 실내 위주.\n- 장소 4~5곳, 시간 순, 밥집 최소 1곳.\n- 검색어는 네이버 지도에서 찾도록 "지역명 상호명" 형태.\n\n[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},"코스":[{"시간":"11:30","장소":"","종류":"밥집","이유":"한 문장","검색어":"","예상비용":"2만원"}],"총예상비용":"1인 5만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"3문장 이내","챙길것":["",""]}';
+  const avoid = avoidList(t.region);
+
+  const prompt = '너는 커플 데이트 코스를 짜는 플래너다. 반드시 웹 검색으로 "'+t.region+'" 지역의 실제 영업 중인 장소를 찾은 뒤에 코스를 짜라.\n\n'
+    + '[조건]\n날짜: '+fmt(t.date)+' ('+dowKo(t.date)+'요일), 계절: '+season()+'\n지역: '+t.region+'\n날씨: '+wline+'\n'
+    + '컨셉: '+t.mood+' / 예산: '+t.budget+' / 이동: '+t.move+'\n\n'
+    + '[이번 컨셉 지침 — 가장 중요]\n'+(MOODRULE[t.mood] || '')+'\n'
+    + '컨셉이 바뀌면 코스가 완전히 달라져야 한다. 어느 컨셉에나 어울리는 무난한 곳으로 채우지 마라.\n\n'
+    + '[겹치지 않게]\n이미 제안했던 곳: '+(avoid.join(', ')||'없음')+'\n위 목록에 있는 장소는 절대 다시 넣지 마라.\n\n'
+    + '[장소 규칙 — 반드시 지켜라]\n'
+    + '- 웹 검색으로 실제 존재와 영업 여부가 확인된 상호만 써라.\n'
+    + '- 확신이 없으면 상호명을 지어내지 말고 "지역명 + 거리/구역/업종"으로 적어라. 예: "포항 죽도시장 물회거리".\n'
+    + '- 음식점과 카페는 네이버·구글 평점이 높은 곳을 우선하고, 5점 만점 평점을 "평점" 항목에 적어라. 모르면 빈 문자열.\n'
+    + '- 검색어: 네이버 지도에 그대로 넣으면 나오는 문자열.\n'
+    + '- 대체검색어: 그 상호가 안 나올 때 쓸 넓은 검색어. 예: "포항 영일대 카페".\n\n'
+    + '[두 사람 취향]\n'+tasteBrief()+'\n\n'
+    + '[기록]\n좋아했던 맛집(별점 높은 순): '+liked+'\n다녀온 여행지: '+been+'\n가보고 싶어하는 곳: '+wish+'\n'
+    + '- 싫어한다고 적힌 것은 절대 넣지 마라.\n- 강수확률이 높으면 실내 위주.\n- 장소 4~5곳, 시간 순, 밥집 최소 1곳.\n\n'
+    + '[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},'
+    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","평점":"4.4","이유":"한 문장","검색어":"","대체검색어":"","예상비용":"2만원"}],'
+    + '"총예상비용":"1인 5만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"3문장 이내","챙길것":["",""]}';
+
   try{
     let r;
     try{ r = await aiJSON(prompt, { search:true }); }
@@ -563,7 +658,9 @@ async function runPlan(){
     const sc = r.점수 || {};
     const bd = { 날씨: w ? wScore(w) : 70, 취향: sc.취향||80, 동선: sc.동선||80, 신선함: sc.신선함||80 };
     const total = Math.round(bd.날씨*.3 + bd.취향*.3 + bd.동선*.2 + bd.신선함*.2);
-    S.tmp.plan = { id:uid(), title:r.제목, one:r.한줄, date:t.date, region:t.region, w:w, bd:bd, total:total, course:r.코스||[], cost:r.총예상비용, trend:r.트렌드, rainplan:r.우천대안, report:r.리포트, bring:(r.챙길것||[]).join(', ') };
+    S.tmp.plan = { id:uid(), title:r.제목, one:r.한줄, date:t.date, region:t.region, mood:t.mood, w:w, bd:bd, total:total,
+      course:r.코스||[], cost:r.총예상비용, trend:r.트렌드, rainplan:r.우천대안, report:r.리포트, bring:(r.챙길것||[]).join(', ') };
+    S.tmp.lastPlaces = (avoid || []).concat((r.코스||[]).map(x => x.장소)).slice(-30);
     out.innerHTML = (warn ? '<p class="hint" style="color:var(--rose);margin-bottom:8px">'+esc(warn)+'</p>' : '') + planHTML(S.tmp.plan);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
   btn.disabled = false; btn.innerHTML = ic('wand',15,'#fff')+' 코스 짜기';
@@ -584,9 +681,11 @@ function planHTML(p){
     h += '<div style="display:flex;gap:12px"><div style="width:46px;flex-shrink:0;text-align:left"><span style="font-family:var(--mono);font-size:11px;color:var(--rose)">'+esc(s.시간)+'</span></div>'
       + '<div style="flex:1;padding-bottom:16px;border-left:1px solid var(--line);padding-left:14px;margin-left:-8px">'
       + '<div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><div style="font-family:var(--disp);font-size:16.5px">'+esc(s.장소)+'</div>'
-      + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div></div>'
+      + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.평점?' · ★'+esc(s.평점):'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div></div>'
       + '<a href="'+naver(s.검색어 || (p.region+' '+s.장소))+'" target="_blank" style="color:var(--naver);flex-shrink:0">'+ic('pin',17)+'</a></div>'
-      + '<p class="muted" style="margin-top:6px">'+esc(s.이유||'')+'</p></div></div>';
+      + '<p class="muted" style="margin-top:6px">'+esc(s.이유||'')+'</p>'
+      + '<a href="'+naver(s.대체검색어 || (p.region+' '+(s.종류||'')))+'" target="_blank" class="hint" style="display:inline-block;margin-top:6px;color:var(--sub);border-bottom:1px solid var(--line)">안 나오면 주변으로 검색</a>'
+      + '</div></div>';
   });
   h += '</div></div>';
   [['총 비용',p.cost],['요즘 뜨는 것',p.trend],['비 오면',p.rainplan],['챙길 것',p.bring]].forEach(x => {
@@ -621,7 +720,16 @@ function secFood(){
   }
   h += '<div id="aifoodout">'+(S.tmp.aifood ? foodAIHTML(S.tmp.aifood) : '')+'</div>';
   if(!S.food.length) h += '<div class="empty">처음 같이 간 밥집부터 적어보자.</div>';
-  S.food.forEach(f => {
+  else {
+    const so = S.tmp.fsort || 'score';
+    h += '<div class="row" style="justify-content:flex-end;gap:6px;margin-bottom:10px">'
+      + '<button data-act="fsort" data-v="score" style="font-size:11.5px;padding:6px 12px;border-radius:16px;border:1px solid '+(so==='score'?'var(--glow)':'var(--line)')+';color:'+(so==='score'?'var(--glow)':'var(--sub)')+'">별점순</button>'
+      + '<button data-act="fsort" data-v="date" style="font-size:11.5px;padding:6px 12px;border-radius:16px;border:1px solid '+(so==='date'?'var(--glow)':'var(--line)')+';color:'+(so==='date'?'var(--glow)':'var(--sub)')+'">최근순</button></div>';
+  }
+  const sorted = S.food.slice().sort((a,b) => (S.tmp.fsort === 'date')
+    ? ((a.date < b.date) ? 1 : -1)
+    : ((b.score||0) - (a.score||0) || ((a.date < b.date) ? 1 : -1)));
+  sorted.forEach(f => {
     h += '<div class="card"><div class="row" style="justify-content:space-between;align-items:flex-start;flex-wrap:nowrap"><div style="min-width:0">'
       + '<div class="row" style="gap:6px"><span style="font-family:var(--mono);font-size:10px;color:var(--glow)">'+fmt(f.date)+'</span>'+(f.by?'<span class="tag">'+esc(f.by)+'</span>':'')+'</div>'
       + '<div style="font-family:var(--disp);font-size:17.5px;margin-top:4px">'+esc(f.name)+'</div>'
@@ -669,7 +777,7 @@ async function runFoodAI(){
   const btn = $('#aifoodbtn'), out = $('#aifoodout');
   btn.innerHTML = '<span class="spin">'+ic('sparkle',13)+'</span> 분석 중…';
   const hist = S.food.map(f => f.name+' | '+(f.kind||'-')+' | '+f.area+' | '+f.menu+' | 별'+f.score+' | '+fmt(f.date)+' | '+ago(f.date)+'일 전').join('\n') || '기록 없음';
-  const p = '연인의 외식 기록을 분석해서 추천해줘. 오늘은 '+fmt(today())+', 계절 '+season()+', 주 활동 지역 '+S.settings.region+'.\n\n[두 사람 취향]\n'+tasteBrief()+'\n\n[기록] (가게 | 종류 | 지역 | 메뉴 | 별점 | 날짜 | 며칠 전)\n'+hist+'\n\n웹 검색으로 '+S.settings.region+' 지역 요즘 인기 맛집도 찾아본 뒤 답하라.\n\n[규칙]\n- 싫어한다고 적힌 음식은 절대 추천하지 마라.\n- 재방문: 별점 높고 오래된 곳을 "N일 됐으니 슬슬" 식으로 구체적으로.\n- 새로운 곳: 취향과 맞되 아직 안 가본 종류로 넓혀줘.\n- 편중: 특정 종류만 먹고 있으면 짚어줘.\n\n[JSON]\n{"취향":"두 문장","편중":"한 문장","재방문":[{"이름":"","이유":""}],"새로운곳":[{"이름":"","지역":"","종류":"","이유":"","검색어":""}],"이번주제안":"한 문장"}';
+  const p = '연인의 외식 기록을 분석해서 추천해줘. 오늘은 '+fmt(today())+', 계절 '+season()+', 주 활동 지역 '+S.settings.region+'.\n\n[두 사람 취향]\n'+tasteBrief()+'\n\n[기록] (가게 | 종류 | 지역 | 메뉴 | 별점 | 날짜 | 며칠 전)\n'+hist+'\n\n웹 검색으로 '+S.settings.region+' 지역 요즘 인기 맛집도 찾아본 뒤 답하라.\n\n[규칙]\n- 싫어한다고 적힌 음식은 절대 추천하지 마라.\n- 재방문: 별점 높고 오래된 곳을 "N일 됐으니 슬슬" 식으로 구체적으로.\n- 새로운 곳: 취향과 맞되 아직 안 가본 종류로 넓혀줘. 네이버·구글 평점 4.0 이상인 곳만 골라 평점도 함께 적어라.\n- 실제 영업 중인 상호만. 확신 없으면 상호 대신 \"지역 + 업종\"으로 적어라.\n- 편중: 특정 종류만 먹고 있으면 짚어줘.\n\n[JSON]\n{"취향":"두 문장","편중":"한 문장","재방문":[{"이름":"","이유":""}],"새로운곳":[{"이름":"","지역":"","종류":"","평점":"4.3","이유":"","검색어":""}],"이번주제안":"한 문장"}';
   try{
     let r;
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
@@ -822,6 +930,9 @@ function viewUs(){
     + '<button class="chip'+(S.whoami===S.settings.you?' on':'')+'" data-act="whoami" data-v="'+esc(S.settings.you)+'">'+esc(S.settings.you)+'</button></div>'
     + '<label class="lbl">처음 만난 날</label><input class="inp" type="date" id="sstart" value="'+S.settings.start+'">'
     + '<label class="lbl">주로 만나는 지역</label><input class="inp" id="sregion" value="'+esc(S.settings.region)+'">'
+    + '<label class="lbl">지도 열기</label><div class="chips">'
+    + '<button class="chip'+(S.settings.mapweb?'':' on')+'" data-act="mapweb" data-v="app">네이버 지도 앱만</button>'
+    + '<button class="chip'+(S.settings.mapweb?' on':'')+'" data-act="mapweb" data-v="both">앱 없으면 웹으로</button></div>'
     + '<label class="lbl">AI 서비스</label><div class="chips">'
     + '<button class="chip'+(S.settings.provider!=='claude'?' on':'')+'" data-act="aiprov" data-v="gemini">Gemini (무료)</button>'
     + '<button class="chip'+(S.settings.provider==='claude'?' on':'')+'" data-act="aiprov" data-v="claude">Claude (유료)</button></div>'
@@ -830,7 +941,9 @@ function viewUs(){
         ? '키는 이 기기에만 저장돼. console.anthropic.com 에서 발급받고 결제수단을 등록해야 해.'
         : 'aistudio.google.com/apikey 에서 구글 계정으로 무료 발급. 카드 등록 없이 돼.')+'</p>'
     + '<label class="lbl">모델 (비워두면 기본값)</label><input class="inp" id="smodel" value="'+esc(S.settings.model||'')+'" placeholder="'+(S.settings.provider==='claude'?'claude-sonnet-4-6':'gemini-flash-latest')+'">'
-    + '<button class="btn full" data-act="savesettings">'+ic('check',15,'#fff')+' 저장하기</button></div>';
+    + '<div class="row"><button class="btn" data-act="savesettings">'+ic('check',15,'#fff')+' 저장하기</button>'
+    + '<button class="ghost hot" data-act="aitest">'+ic('sparkle',13)+' 연결 테스트</button></div>'
+    + '<p class="hint" id="aitestout" style="margin-top:10px"></p></div>';
 
   h += '<div class="card"><span class="eyebrow">데이터</span>'
     + '<p class="hint" style="margin:8px 0 12px">기록은 이 기기에만 저장돼. 둘이 맞추려면 내보낸 파일을 상대에게 보내고, 상대가 불러오기로 열면 돼.</p>'
@@ -1138,6 +1251,8 @@ document.addEventListener('click', async (e) => {
   if(a === 'delcover'){ await imgDel('cover'); delete IMG['cover']; render(); return; }
   if(a === 'provdel'){ await imgDel('prov:'+v); delete IMG['prov:'+v]; render(); return; }
   if(a === 'prov'){ pickProv(v); return; }
+  if(a === 'setcover'){ const p = v.split('|'); saveDay(p[0], true); const r = S.days[p[0]]; if(r){ r.cover = p[1]; save('days'); } render(); return; }
+  if(a === 'viewall'){ const p = v.split('|'); showPhotoView(p[0], p[1], 'all'); return; }
   if(a === 'viewphoto'){ const p = v.split('|'); showPhotoView(p[0], p[1]); return; }
   if(a === 'addphoto'){ pickPhoto(v); return; }
   if(a === 'delphoto'){
@@ -1182,6 +1297,7 @@ document.addEventListener('click', async (e) => {
 
   if(a === 'seg'){ S.tmp.seg = v; render(); return; }
   if(a === 'ttab'){ S.tmp.ttab = v; render(); return; }
+  if(a === 'fsort'){ S.tmp.fsort = v; render(); return; }
   if(a === 'formfood'){ S.tmp.formfood = !S.tmp.formfood; render(); return; }
   if(a === 'fscore'){ ['name','area','menu','memo'].forEach(k => S.tmp.newfood[k] = ($('#f'+k)||{}).value || ''); S.tmp.newfood.date = $('#fdate').value; S.tmp.newfood.score = parseInt(v,10); render(); return; }
   if(a === 'savefood'){
@@ -1218,13 +1334,27 @@ document.addEventListener('click', async (e) => {
     save('taste'); toast(v+'의 취향을 저장했어'); return;
   }
   if(a === 'whoami'){ S.whoami = v; save('whoami'); render(); return; }
+  if(a === 'aitest'){
+    const out = $('#aitestout');
+    S.settings.key = $('#skey').value.trim();
+    S.settings.model = $('#smodel').value.trim();
+    save('settings');
+    out.style.color = 'var(--sub)'; out.textContent = '확인 중…';
+    try{
+      const r = await ai('한 단어로만 답해줘: 안녕');
+      out.style.color = 'var(--naver)';
+      out.textContent = '연결 성공 · 모델 ' + (S.settings.model || '기본') + ' · 응답 "' + r.trim().slice(0,20) + '"';
+    }catch(e){ out.style.color = 'var(--rose)'; out.textContent = aiErr(e); }
+    return;
+  }
+  if(a === 'mapweb'){ S.settings.mapweb = (v === 'both'); save('settings'); render(); return; }
   if(a === 'aiprov'){
     S.settings.provider = v; S.settings.model = '';
     save('settings'); render(); return;
   }
   if(a === 'savesettings'){
     S.settings = { me:$('#sme').value||'나', you:$('#syou').value||'너', start:$('#sstart').value, region:$('#sregion').value,
-      key:$('#skey').value.trim(), provider:S.settings.provider||'gemini', model:$('#smodel').value.trim() };
+      key:$('#skey').value.trim(), provider:S.settings.provider||'gemini', model:$('#smodel').value.trim(), mapweb:!!S.settings.mapweb };
     save('settings');
     if([S.settings.me, S.settings.you].indexOf(S.whoami) < 0){ S.whoami = S.settings.me; save('whoami'); }
     toast('저장했어'); render(); return;
