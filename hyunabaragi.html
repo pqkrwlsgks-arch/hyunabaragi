@@ -338,37 +338,50 @@ function wScore(w){
 }
 
 /* ========================= 장소 검증 (카카오 로컬) ========================= */
+let KAKAO_ERR = '';
 async function kakaoFind(q){
-  if(!S.settings.kakao || !q) return null;
+  if(!S.settings.kakao || !q) return { ok:false, fail:true, msg:'키 없음' };
   try{
     const r = await fetch('https://dapi.kakao.com/v2/local/search/keyword.json?size=5&query=' + encodeURIComponent(q), {
       headers:{ Authorization:'KakaoAK ' + S.settings.kakao }
     });
-    if(!r.ok) return null;
+    if(!r.ok){
+      let extra = '';
+      try{ const e = await r.json(); extra = e.message || e.msg || ''; }catch(x){}
+      return { ok:false, fail:true, msg:'HTTP ' + r.status + (extra ? ' · ' + extra : '') };
+    }
     const d = await r.json();
     const doc = (d.documents || [])[0];
-    if(!doc) return null;
-    return { name:doc.place_name, addr:doc.road_address_name || doc.address_name || '', cat:doc.category_name || '', url:doc.place_url || '' };
-  }catch(e){ return null; }
+    if(!doc) return { ok:true, doc:null };
+    return { ok:true, doc:{ name:doc.place_name, addr:doc.road_address_name || doc.address_name || '' } };
+  }catch(e){
+    return { ok:false, fail:true, msg:'요청 차단됨 (도메인 등록 확인)' };
+  }
 }
 async function verifyStops(list, region, nameKey, queryKey, altKey){
-  if(!S.settings.kakao) return list;
+  KAKAO_ERR = '';
+  if(!S.settings.kakao) return false;
   for(const st of list){
     const q1 = st[queryKey] || ((region||'') + ' ' + (st[nameKey]||''));
-    let hit = await kakaoFind(q1);
-    if(hit){ st.확인 = 'ok'; }
-    else {
+    let r = await kakaoFind(q1);
+    if(r.fail){ KAKAO_ERR = r.msg; return false; }
+    let doc = r.doc, mode = 'ok';
+    if(!doc){
       const q2 = st[altKey] || ((region||'') + ' ' + (st.종류 || st.유형 || ''));
-      hit = await kakaoFind(q2);
-      if(hit){ st.확인 = 'alt'; } else { st.확인 = 'no'; }
+      const r2 = await kakaoFind(q2);
+      if(r2.fail){ KAKAO_ERR = r2.msg; return false; }
+      doc = r2.doc; mode = 'alt';
     }
-    if(hit){
-      st[nameKey] = hit.name;
-      st.주소 = hit.addr;
-      st[queryKey] = hit.addr ? (hit.name + ' ' + hit.addr.split(' ').slice(0,2).join(' ')) : hit.name;
+    if(doc){
+      st.확인 = mode;
+      st[nameKey] = doc.name;
+      st.주소 = doc.addr;
+      st[queryKey] = doc.addr ? (doc.name + ' ' + doc.addr.split(' ').slice(0,2).join(' ')) : doc.name;
+    } else {
+      st.확인 = 'no';
     }
   }
-  return list;
+  return true;
 }
 /* ========================= 재방문 엔진 ========================= */
 function revisit(){
@@ -753,8 +766,13 @@ async function runPlan(){
       course:r.코스||[], cost:r.총예상비용, trend:r.트렌드, rainplan:r.우천대안, report:r.리포트, bring:(r.챙길것||[]).join(', ') };
     if(S.settings.kakao){
       btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 실제 장소 확인 중…';
-      await verifyStops(S.tmp.plan.course, t.region, '장소', '검색어', '대체검색어');
-      S.tmp.plan.course = S.tmp.plan.course.filter(x => x.확인 !== 'no');
+      const ok = await verifyStops(S.tmp.plan.course, t.region, '장소', '검색어', '대체검색어');
+      if(ok){
+        const kept = S.tmp.plan.course.filter(x => x.확인 !== 'no');
+        if(kept.length) S.tmp.plan.course = kept;
+      } else {
+        S.tmp.plan.kakaoErr = KAKAO_ERR;
+      }
     }
     S.tmp.lastPlaces = (avoid || []).concat((S.tmp.plan.course||[]).map(x => x.장소)).slice(-30);
     out.innerHTML = (warn ? '<p class="hint" style="color:var(--rose);margin-bottom:8px">'+esc(warn)+'</p>' : '') + planHTML(S.tmp.plan);
@@ -789,7 +807,8 @@ function planHTML(p){
     if(x[1]) h += '<div style="display:flex;gap:10px;padding:5px 0;border-top:1px solid var(--line)"><span style="font-family:var(--mono);font-size:9.5px;color:var(--glow);width:66px;flex-shrink:0;padding-top:4px">'+x[0]+'</span><span style="font-size:13px;line-height:1.7">'+esc(x[1])+'</span></div>';
   });
   if(p.report) h += '<div style="background:var(--soft);border-radius:14px;padding:14px;margin-top:14px"><span class="eyebrow">총평</span><p style="font-family:var(--disp);font-size:14.5px;line-height:1.9;margin-top:6px">'+esc(p.report)+'</p></div>';
-  if(!S.settings.kakao) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">장소 검증이 꺼져 있어. 우리 탭에서 카카오 키를 넣으면 없는 가게를 걸러낼 수 있어.</p>';
+  if(p.kakaoErr) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">카카오 장소 검증 실패 · '+esc(p.kakaoErr)+'. 검증 없이 그대로 보여줄게.</p>';
+  else if(!S.settings.kakao) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">장소 검증이 꺼져 있어. 우리 탭에서 카카오 키를 넣으면 없는 가게를 걸러낼 수 있어.</p>';
   h += '<div class="row" style="margin-top:14px"><button class="ghost sun" data-act="savecourse">'+ic('save',13)+' 이 코스 저장</button>'
     + '<a class="ghost nv" href="'+naver(p.region+' '+(p.course[0]?p.course[0].장소:''))+'" target="_blank">'+ic('pin',13)+' 지도로 열기</a></div></div>';
   return h;
@@ -881,8 +900,9 @@ async function runFoodAI(){
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
     if(S.settings.kakao && r.새로운곳){
       out.innerHTML = '<p class="hint"><span class="spin">'+ic('sparkle',13)+'</span> 실제 가게인지 확인 중…</p>';
-      await verifyStops(r.새로운곳, S.settings.region, '이름', '검색어', '검색어');
-      r.새로운곳 = r.새로운곳.filter(x => x.확인 !== 'no');
+      const ok = await verifyStops(r.새로운곳, S.settings.region, '이름', '검색어', '검색어');
+      if(ok){ const kept = r.새로운곳.filter(x => x.확인 !== 'no'); if(kept.length) r.새로운곳 = kept; }
+      else r.kakaoErr = KAKAO_ERR;
     }
     S.tmp.aifood = r; out.innerHTML = foodAIHTML(r);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
@@ -1004,8 +1024,9 @@ async function runTravelAI(){
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
     if(S.settings.kakao && r.다음여행){
       out.innerHTML = '<p class="hint"><span class="spin">'+ic('compass',13)+'</span> 실제 장소인지 확인 중…</p>';
-      await verifyStops(r.다음여행, '', '장소', '검색어', '검색어');
-      r.다음여행 = r.다음여행.filter(x => x.확인 !== 'no');
+      const ok = await verifyStops(r.다음여행, '', '장소', '검색어', '검색어');
+      if(ok){ const kept = r.다음여행.filter(x => x.확인 !== 'no'); if(kept.length) r.다음여행 = kept; }
+      else r.kakaoErr = KAKAO_ERR;
     }
     S.tmp.aitravel = r; out.innerHTML = travelAIHTML(r);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
@@ -1052,7 +1073,8 @@ function viewUs(){
         : 'aistudio.google.com/apikey 에서 구글 계정으로 무료 발급. 카드 등록 없이 돼.')+'</p>'
     + '<label class="lbl">모델 (비워두면 기본값)</label><input class="inp" id="smodel" value="'+esc(S.settings.model||'')+'" placeholder="'+(S.settings.provider==='claude'?'claude-sonnet-4-6':'gemini-flash-latest')+'">'
     + '<div class="row"><button class="btn" data-act="savesettings">'+ic('check',15,'#fff')+' 저장하기</button>'
-    + '<button class="ghost hot" data-act="aitest">'+ic('sparkle',13)+' 연결 테스트</button></div>'
+    + '<button class="ghost hot" data-act="aitest">'+ic('sparkle',13)+' AI 테스트</button>'
+    + '<button class="ghost" data-act="kakaotest">'+ic('pin',13)+' 카카오 테스트</button></div>'
     + '<p class="hint" id="aitestout" style="margin-top:10px"></p></div>';
 
   h += '<div class="card"><span class="eyebrow">데이터</span>'
@@ -1444,6 +1466,16 @@ document.addEventListener('click', async (e) => {
     save('taste'); toast(v+'의 취향을 저장했어'); return;
   }
   if(a === 'whoami'){ S.whoami = v; save('whoami'); render(); return; }
+  if(a === 'kakaotest'){
+    const out = $('#aitestout');
+    S.settings.kakao = $('#skakao').value.trim(); save('settings');
+    out.style.color = 'var(--sub)'; out.textContent = '확인 중…';
+    const r = await kakaoFind('포항 죽도시장');
+    if(r.fail){ out.style.color = 'var(--rose)'; out.textContent = '카카오 실패 · ' + r.msg + ' (일반 메뉴에서 Web 도메인에 ' + location.origin + ' 등록했는지 확인)'; }
+    else if(!r.doc){ out.style.color = 'var(--rose)'; out.textContent = '응답은 왔는데 결과가 비었어.'; }
+    else { out.style.color = 'var(--naver)'; out.textContent = '카카오 연결 성공 · ' + r.doc.name; }
+    return;
+  }
   if(a === 'aitest'){
     const out = $('#aitestout');
     S.settings.key = $('#skey').value.trim();
