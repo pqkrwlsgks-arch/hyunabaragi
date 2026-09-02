@@ -279,15 +279,47 @@ function tasteBrief(){
 
 /* ========================= 날씨 ========================= */
 const WMO = {0:['맑음','sun'],1:['대체로 맑음','sun'],2:['구름 조금','cloud'],3:['흐림','cloud'],45:['안개','cloud'],48:['안개','cloud'],51:['이슬비','rain'],53:['이슬비','rain'],55:['이슬비','rain'],61:['비','rain'],63:['비','rain'],65:['강한 비','rain'],71:['눈','cloud'],73:['눈','cloud'],75:['많은 눈','cloud'],80:['소나기','rain'],81:['소나기','rain'],82:['강한 소나기','rain'],95:['천둥번개','rain'],96:['천둥번개','rain'],99:['천둥번개','rain']};
+const GEO = {
+  '서울':'Seoul','부산':'Busan','대구':'Daegu','인천':'Incheon','광주':'Gwangju','대전':'Daejeon','울산':'Ulsan','세종':'Sejong',
+  '경기':'Suwon','강원':'Chuncheon','충북':'Cheongju','충청북':'Cheongju','충남':'Cheonan','충청남':'Cheonan',
+  '전북':'Jeonju','전라북':'Jeonju','전남':'Yeosu','전라남':'Yeosu','경북':'Andong','경상북':'Andong','경남':'Changwon','경상남':'Changwon',
+  '제주':'Jeju','서귀포':'Seogwipo','포항':'Pohang','경주':'Gyeongju','강릉':'Gangneung','속초':'Sokcho','양양':'Yangyang','평창':'Pyeongchang',
+  '춘천':'Chuncheon','원주':'Wonju','안동':'Andong','전주':'Jeonju','여수':'Yeosu','순천':'Suncheon','목포':'Mokpo','통영':'Tongyeong',
+  '거제':'Geoje','남해':'Namhae','진주':'Jinju','창원':'Changwon','김해':'Gimhae','천안':'Cheonan','청주':'Cheongju','충주':'Chungju',
+  '공주':'Gongju','부여':'Buyeo','태안':'Taean','보령':'Boryeong','군산':'Gunsan','남원':'Namwon','담양':'Damyang','보성':'Boseong',
+  '수원':'Suwon','용인':'Yongin','고양':'Goyang','파주':'Paju','가평':'Gapyeong','양평':'Yangpyeong','남양주':'Namyangju','포천':'Pocheon',
+  '동해':'Donghae','삼척':'Samcheok','정선':'Jeongseon','울릉':'Ulleung','영덕':'Yeongdeok','울진':'Uljin','문경':'Mungyeong','상주':'Sangju',
+  '완도':'Wando','해남':'Haenam','제천':'Jecheon','단양':'Danyang','부안':'Buan','고창':'Gochang','서산':'Seosan',
+};
+function geoCandidates(region){
+  const raw = String(region || '').trim();
+  const base = raw.replace(/\s+/g,'').replace(/(특별자치시|특별자치도|광역시|특별시|자치시|자치도)$/,'').replace(/(시|도|군|구)$/,'');
+  const out = [];
+  const push = (v) => { if(v && out.indexOf(v) < 0) out.push(v); };
+  push(GEO[base]); push(GEO[raw.replace(/\s+/g,'')]);
+  Object.keys(GEO).forEach(k => { if(base.indexOf(k) === 0) push(GEO[k]); });
+  push(raw); push(base);
+  return out;
+}
+async function geocode(region){
+  for(const q of geoCandidates(region)){
+    try{
+      const g = await fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(q) + '&count=5&language=ko&format=json').then(r => r.json());
+      const hit = (g.results || []).filter(x => x.country_code === 'KR')[0] || (g.results || [])[0];
+      if(hit) return hit;
+    }catch(e){}
+  }
+  return null;
+}
 async function weather(region, date){
-  const g = await fetch('https://geocoding-api.open-meteo.com/v1/search?name='+encodeURIComponent(region)+'&count=1&language=ko&format=json').then(r => r.json());
-  if(!g.results || !g.results.length) throw new Error('‘'+region+'’ 지역을 못 찾았어.');
-  const p = g.results[0];
+  const p = await geocode(region);
+  if(!p) throw new Error('‘'+region+'’ 지역을 못 찾았어.');
   const w = await fetch('https://api.open-meteo.com/v1/forecast?latitude='+p.latitude+'&longitude='+p.longitude+'&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=Asia%2FSeoul&forecast_days=16').then(r => r.json());
-  const i = w.daily.time.indexOf(date);
+  const i = (w.daily && w.daily.time) ? w.daily.time.indexOf(date) : -1;
   if(i < 0) throw new Error('그 날짜는 예보 범위 밖이야. 오늘부터 15일 안으로 골라줘.');
   const m = WMO[w.daily.weather_code[i]] || ['알 수 없음','cloud'];
-  return { place:p.name, label:m[0], icon:m[1], tmax:Math.round(w.daily.temperature_2m_max[i]), tmin:Math.round(w.daily.temperature_2m_min[i]), rain:w.daily.precipitation_probability_max[i]||0, wind:Math.round(w.daily.wind_speed_10m_max[i]) };
+  return { place:region, label:m[0], icon:m[1], tmax:Math.round(w.daily.temperature_2m_max[i]), tmin:Math.round(w.daily.temperature_2m_min[i]),
+    rain:w.daily.precipitation_probability_max[i]||0, wind:Math.round(w.daily.wind_speed_10m_max[i]) };
 }
 function wScore(w){
   const rain = Math.max(0, 100 - w.rain);
@@ -606,11 +638,11 @@ function chipRow(label, opts, val, name){
 function nextWeekend(){ const d = new Date(); d.setDate(d.getDate() + (((6-d.getDay()+7)%7) || 7)); return iso(d); }
 
 const MOODRULE = {
-  '감성 · 분위기':'뷰·조명·인테리어가 좋은 곳 위주. 노을이나 야경을 볼 수 있는 시간대를 반드시 코스에 포함. 조용하고 사진이 잘 나오는 곳.',
-  '액티브':'몸을 쓰는 활동을 2개 이상 넣어라. 트레킹·자전거·해양레저·체험공방 같은 것. 카페에 오래 앉는 코스는 넣지 마라.',
-  '맛집 투어':'먹는 곳을 3곳 이상 넣어라. 본식·디저트·야식 또는 시장 먹거리로 구성. 평점 높은 집 위주.',
-  '조용한 산책':'걷기 좋은 길·공원·해안길·수목원 중심. 이동은 짧게, 한 곳에 머무는 시간을 길게. 붐비는 관광지는 빼라.',
-  '실내 데이트':'모든 장소를 실내로만 구성. 전시·공방·서점·영화·실내스포츠·카페. 비가 와도 그대로 진행되는 코스.',
+  '감성 · 분위기':'분위기 좋은 공간이 중심축이다. 뷰·조명·인테리어가 뛰어난 곳 2곳과 노을 또는 야경 포인트 1곳을 축으로 삼고, 그 분위기에 어울리는 식사 1곳과 이동 중 들를 곳 1곳을 곁들여라.',
+  '액티브':'몸을 쓰는 활동이 중심축이다. 트레킹·자전거·해양레저·클라이밍·체험 중 2곳을 축으로 삼고, 활동 사이에 에너지 채울 식사 1곳과 마무리로 쉴 곳 1곳을 곁들여라. 카페에 오래 앉는 구성은 금지.',
+  '맛집 투어':'먹는 것이 중심축이다. 식사 2곳(본식과 후식 또는 시장 먹거리)과 디저트·카페 1곳을 축으로 삼되, 그 사이에 소화시키며 걸을 산책로나 구경거리를 1~2곳 반드시 끼워 넣어라. 식당만 줄줄이 나열한 코스는 실패한 코스다.',
+  '조용한 산책':'걷는 것이 중심축이다. 산책로·공원·해안길·수목원 중 2곳을 축으로 삼고, 중간에 앉아 쉴 조용한 카페 1곳과 붐비지 않는 식사 1곳을 곁들여라. 붐비는 관광지는 넣지 마라.',
+  '실내 데이트':'실내 체험이 중심축이다. 전시·공방·서점·실내스포츠·영화 중 2곳을 축으로 삼고, 실내 식사 1곳과 카페 1곳을 곁들여라. 야외 장소는 하나도 넣지 마라.',
 };
 function avoidList(region){
   const out = [];
@@ -636,7 +668,9 @@ async function runPlan(){
     + '[조건]\n날짜: '+fmt(t.date)+' ('+dowKo(t.date)+'요일), 계절: '+season()+'\n지역: '+t.region+'\n날씨: '+wline+'\n'
     + '컨셉: '+t.mood+' / 예산: '+t.budget+' / 이동: '+t.move+'\n\n'
     + '[이번 컨셉 지침 — 가장 중요]\n'+(MOODRULE[t.mood] || '')+'\n'
-    + '컨셉이 바뀌면 코스가 완전히 달라져야 한다. 어느 컨셉에나 어울리는 무난한 곳으로 채우지 마라.\n\n'
+    + '컨셉이 바뀌면 코스가 완전히 달라져야 한다. 어느 컨셉에나 어울리는 무난한 곳으로 채우지 마라.\n'
+    + '중심축 장소가 코스의 절반 이상을 차지해야 하고, 나머지는 그 중심을 살려주는 곁들임이어야 한다.\n'
+    + '같은 종류를 연달아 배치하지 마라. 예를 들어 식당 다음에 바로 식당은 안 된다.\n\n'
     + '[겹치지 않게]\n이미 제안했던 곳: '+(avoid.join(', ')||'없음')+'\n위 목록에 있는 장소는 절대 다시 넣지 마라.\n\n'
     + '[장소 규칙 — 반드시 지켜라]\n'
     + '- 웹 검색으로 실제 존재와 영업 여부가 확인된 상호만 써라.\n'
