@@ -337,6 +337,39 @@ function wScore(w){
   return Math.round(rain*.5 + temp*.4 + wind*.1);
 }
 
+/* ========================= 장소 검증 (카카오 로컬) ========================= */
+async function kakaoFind(q){
+  if(!S.settings.kakao || !q) return null;
+  try{
+    const r = await fetch('https://dapi.kakao.com/v2/local/search/keyword.json?size=5&query=' + encodeURIComponent(q), {
+      headers:{ Authorization:'KakaoAK ' + S.settings.kakao }
+    });
+    if(!r.ok) return null;
+    const d = await r.json();
+    const doc = (d.documents || [])[0];
+    if(!doc) return null;
+    return { name:doc.place_name, addr:doc.road_address_name || doc.address_name || '', cat:doc.category_name || '', url:doc.place_url || '' };
+  }catch(e){ return null; }
+}
+async function verifyStops(list, region, nameKey, queryKey, altKey){
+  if(!S.settings.kakao) return list;
+  for(const st of list){
+    const q1 = st[queryKey] || ((region||'') + ' ' + (st[nameKey]||''));
+    let hit = await kakaoFind(q1);
+    if(hit){ st.확인 = 'ok'; }
+    else {
+      const q2 = st[altKey] || ((region||'') + ' ' + (st.종류 || st.유형 || ''));
+      hit = await kakaoFind(q2);
+      if(hit){ st.확인 = 'alt'; } else { st.확인 = 'no'; }
+    }
+    if(hit){
+      st[nameKey] = hit.name;
+      st.주소 = hit.addr;
+      st[queryKey] = hit.addr ? (hit.name + ' ' + hit.addr.split(' ').slice(0,2).join(' ')) : hit.name;
+    }
+  }
+  return list;
+}
 /* ========================= 재방문 엔진 ========================= */
 function revisit(){
   const best = {};
@@ -718,7 +751,12 @@ async function runPlan(){
     const total = Math.round(bd.날씨*.3 + bd.취향*.3 + bd.동선*.2 + bd.신선함*.2);
     S.tmp.plan = { id:uid(), title:r.제목, one:r.한줄, date:t.date, region:t.region, mood:t.mood, w:w, bd:bd, total:total,
       course:r.코스||[], cost:r.총예상비용, trend:r.트렌드, rainplan:r.우천대안, report:r.리포트, bring:(r.챙길것||[]).join(', ') };
-    S.tmp.lastPlaces = (avoid || []).concat((r.코스||[]).map(x => x.장소)).slice(-30);
+    if(S.settings.kakao){
+      btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 실제 장소 확인 중…';
+      await verifyStops(S.tmp.plan.course, t.region, '장소', '검색어', '대체검색어');
+      S.tmp.plan.course = S.tmp.plan.course.filter(x => x.확인 !== 'no');
+    }
+    S.tmp.lastPlaces = (avoid || []).concat((S.tmp.plan.course||[]).map(x => x.장소)).slice(-30);
     out.innerHTML = (warn ? '<p class="hint" style="color:var(--rose);margin-bottom:8px">'+esc(warn)+'</p>' : '') + planHTML(S.tmp.plan);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
   btn.disabled = false; btn.innerHTML = ic('wand',15,'#fff')+' 코스 짜기';
@@ -739,7 +777,8 @@ function planHTML(p){
     h += '<div style="display:flex;gap:12px"><div style="width:46px;flex-shrink:0;text-align:left"><span style="font-family:var(--mono);font-size:11px;color:var(--rose)">'+esc(s.시간)+'</span></div>'
       + '<div style="flex:1;padding-bottom:16px;border-left:1px solid var(--line);padding-left:14px;margin-left:-8px">'
       + '<div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><div style="font-family:var(--disp);font-size:16.5px">'+esc(s.장소)+'</div>'
-      + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.평점?' · ★'+esc(s.평점):'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div></div>'
+      + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.평점?' · ★'+esc(s.평점):'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div>'
+      + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.확인==='alt'?' · 비슷한 곳으로 대체':'')+'</div>':'')+'</div>'
       + '<a href="'+naver(s.검색어 || (p.region+' '+s.장소))+'" target="_blank" style="color:var(--naver);flex-shrink:0">'+ic('pin',17)+'</a></div>'
       + '<p class="muted" style="margin-top:6px">'+esc(s.이유||'')+'</p>'
       + '<a href="'+naver(s.대체검색어 || (p.region+' '+(s.종류||'')))+'" target="_blank" class="hint" style="display:inline-block;margin-top:6px;color:var(--sub);border-bottom:1px solid var(--line)">안 나오면 주변으로 검색</a>'
@@ -750,6 +789,7 @@ function planHTML(p){
     if(x[1]) h += '<div style="display:flex;gap:10px;padding:5px 0;border-top:1px solid var(--line)"><span style="font-family:var(--mono);font-size:9.5px;color:var(--glow);width:66px;flex-shrink:0;padding-top:4px">'+x[0]+'</span><span style="font-size:13px;line-height:1.7">'+esc(x[1])+'</span></div>';
   });
   if(p.report) h += '<div style="background:var(--soft);border-radius:14px;padding:14px;margin-top:14px"><span class="eyebrow">총평</span><p style="font-family:var(--disp);font-size:14.5px;line-height:1.9;margin-top:6px">'+esc(p.report)+'</p></div>';
+  if(!S.settings.kakao) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">장소 검증이 꺼져 있어. 우리 탭에서 카카오 키를 넣으면 없는 가게를 걸러낼 수 있어.</p>';
   h += '<div class="row" style="margin-top:14px"><button class="ghost sun" data-act="savecourse">'+ic('save',13)+' 이 코스 저장</button>'
     + '<a class="ghost nv" href="'+naver(p.region+' '+(p.course[0]?p.course[0].장소:''))+'" target="_blank">'+ic('pin',13)+' 지도로 열기</a></div></div>';
   return h;
@@ -839,6 +879,11 @@ async function runFoodAI(){
   try{
     let r;
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
+    if(S.settings.kakao && r.새로운곳){
+      out.innerHTML = '<p class="hint"><span class="spin">'+ic('sparkle',13)+'</span> 실제 가게인지 확인 중…</p>';
+      await verifyStops(r.새로운곳, S.settings.region, '이름', '검색어', '검색어');
+      r.새로운곳 = r.새로운곳.filter(x => x.확인 !== 'no');
+    }
     S.tmp.aifood = r; out.innerHTML = foodAIHTML(r);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
   btn.innerHTML = ic('sparkle',13)+' AI 분석 · 추천';
@@ -957,6 +1002,11 @@ async function runTravelAI(){
   try{
     let r;
     try{ r = await aiJSON(p, { search:true }); }catch(e){ r = await aiJSON(p); }
+    if(S.settings.kakao && r.다음여행){
+      out.innerHTML = '<p class="hint"><span class="spin">'+ic('compass',13)+'</span> 실제 장소인지 확인 중…</p>';
+      await verifyStops(r.다음여행, '', '장소', '검색어', '검색어');
+      r.다음여행 = r.다음여행.filter(x => x.확인 !== 'no');
+    }
     S.tmp.aitravel = r; out.innerHTML = travelAIHTML(r);
   }catch(e){ out.innerHTML = '<p class="hint" style="color:var(--rose)">'+esc(aiErr(e))+'</p>'; }
   btn.innerHTML = ic('compass',13)+' AI 분석 · 추천';
@@ -988,6 +1038,8 @@ function viewUs(){
     + '<button class="chip'+(S.whoami===S.settings.you?' on':'')+'" data-act="whoami" data-v="'+esc(S.settings.you)+'">'+esc(S.settings.you)+'</button></div>'
     + '<label class="lbl">처음 만난 날</label><input class="inp" type="date" id="sstart" value="'+S.settings.start+'">'
     + '<label class="lbl">주로 만나는 지역</label><input class="inp" id="sregion" value="'+esc(S.settings.region)+'">'
+    + '<label class="lbl">카카오 REST 키 (장소 검증용)</label><input class="inp" id="skakao" type="password" value="'+esc(S.settings.kakao||'')+'" placeholder="없어도 되지만 넣으면 정확해져">'
+    + '<p class="hint" style="margin:-4px 0 12px">'+(S.settings.kakao?'켜져 있어. AI가 고른 곳을 실제 지도 데이터와 대조해서, 없는 가게는 빼고 이름·주소를 정확하게 고쳐줘.':'꺼져 있어. 이걸 넣어야 없는 가게를 걸러낼 수 있어. developers.kakao.com 에서 무료.')+'</p>'
     + '<label class="lbl">지도 열기</label><div class="chips">'
     + '<button class="chip'+(S.settings.mapweb?'':' on')+'" data-act="mapweb" data-v="app">네이버 지도 앱만</button>'
     + '<button class="chip'+(S.settings.mapweb?' on':'')+'" data-act="mapweb" data-v="both">앱 없으면 웹으로</button></div>'
@@ -1412,7 +1464,7 @@ document.addEventListener('click', async (e) => {
   }
   if(a === 'savesettings'){
     S.settings = { me:$('#sme').value||'나', you:$('#syou').value||'너', start:$('#sstart').value, region:$('#sregion').value,
-      key:$('#skey').value.trim(), provider:S.settings.provider||'gemini', model:$('#smodel').value.trim(), mapweb:!!S.settings.mapweb };
+      key:$('#skey').value.trim(), provider:S.settings.provider||'gemini', model:$('#smodel').value.trim(), mapweb:!!S.settings.mapweb, kakao:($('#skakao')?$('#skakao').value.trim():(S.settings.kakao||'')) };
     save('settings');
     if([S.settings.me, S.settings.you].indexOf(S.whoami) < 0){ S.whoami = S.settings.me; save('whoami'); }
     toast('저장했어'); render(); return;
