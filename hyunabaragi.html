@@ -386,7 +386,8 @@ async function kakaoFind(q, code, center){
     const docs = (d.documents || [])
       .filter(x => x.category_group_code)
       .map(x => ({ name:x.place_name, addr:x.road_address_name || x.address_name || '',
-                   code:x.category_group_code, cat:(x.category_name||'').split('>').pop().trim() }));
+                   code:x.category_group_code, phone:(x.phone||'').trim(),
+                   full:(x.category_name||''), cat:(x.category_name||'').split('>').pop().trim() }));
     return { ok:true, docs:docs };
   }catch(e){
     return { ok:false, fail:true, msg:'요청 차단됨 (도메인 등록 확인)' };
@@ -411,14 +412,18 @@ async function verifyStops(list, region, nameKey, queryKey, altKey){
     return toks.some(t => a.indexOf(t) >= 0);
   };
   const used = [];
-  const pick = (docs, code, strict) => {
-    for(const d of (docs || [])){
-      if(used.indexOf(d.name) >= 0) continue;
-      if(code && d.code !== code) continue;
-      if(strict && !inRegion(d.addr)) continue;
-      return d;
+  const looksReal = (d) => {
+    if(d.code === 'FD6' || d.code === 'CE7'){
+      if(!d.phone) return false;
+      if((d.full || '').split('>').length < 3) return false;
     }
-    return null;
+    if(/^[가-힣]{1,4}(빌라|아파트|주택|맨션|하우스|타운|빌|사택|기숙사)$/.test(d.name)) return false;
+    return true;
+  };
+  const pick = (docs, code, strict) => {
+    const pool = (docs || []).filter(d => used.indexOf(d.name) < 0
+      && (!code || d.code === code) && (!strict || inRegion(d.addr)));
+    return pool.filter(looksReal)[0] || null;
   };
   for(const st of list){
     const wanted = st[nameKey] || '';
@@ -437,6 +442,10 @@ async function verifyStops(list, region, nameKey, queryKey, altKey){
     }
     if(doc){
       used.push(doc.name);
+      if(mode === 'alt'){
+        st.이유 = 'AI가 고른 곳을 지도에서 못 찾아서, 같은 지역·같은 업종의 실제 장소로 바꿨어. 분위기는 직접 확인해줘.';
+        st.평점 = ''; st.영업시간 = ''; st.휴무일 = '';
+      }
       st.확인 = mode;
       st[nameKey] = doc.name;
       st.주소 = doc.addr;
@@ -836,6 +845,8 @@ async function runPlan(){
     + '- 장소는 5~6곳. 낮부터 저녁까지 이어지는 하루를 채워라.\n'
     + '- 같은 장소를 두 번 넣지 마라. 모든 장소는 서로 달라야 한다.\n'
     + '- "종류"는 그 장소의 실제 성격을 정확히 적어라. 항구나 해변을 카페로, 공원을 식당으로 적지 마라.\n'
+    + '- "이유"에는 검색으로 확인한 사실만 써라. 오션뷰·통창·루프탑·노을 명당 같은 묘사는 실제로 확인했을 때만 쓰고, 아니면 쓰지 마라.\n'
+    + '- 바다가 보인다고 쓰려면 그 장소가 실제 해안가에 있어야 한다. 내륙에 있는 곳에 오션뷰라고 쓰지 마라.\n'
     + '- 각 장소의 "이유"는 두 문장으로. 왜 이 순서인지, 거기서 둘이 뭘 하면 좋은지 구체적으로 써라.\n'
     + '- "리포트"는 네 문장으로. 이 코스의 흐름과 하이라이트를 설명하라.\n\n'
     + '[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},'
@@ -884,7 +895,7 @@ function planHTML(p){
       + '<div style="flex:1;padding-bottom:16px;border-left:1px solid var(--line);padding-left:14px;margin-left:-8px">'
       + '<div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><div style="font-family:var(--disp);font-size:16.5px">'+esc(s.장소)+'</div>'
       + '<div style="font-family:var(--mono);font-size:9.5px;color:var(--glow);margin-top:3px">'+esc(s.종류||'')+(s.평점?' · ★'+esc(s.평점):'')+(s.예상비용?' · '+esc(s.예상비용):'')+'</div>'
-      + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.업종?' · '+esc(s.업종):'')+(s.확인==='alt'?' · 비슷한 곳으로 대체':'')+'</div>':'')
+      + (s.주소?'<div style="font-size:11px;color:var(--sub);margin-top:3px">'+esc(s.주소)+(s.업종?' · '+esc(s.업종):'')+(s.확인==='alt'?' · 대체된 장소':'')+'</div>':'')
       + (s.영업시간?'<div style="font-family:var(--mono);font-size:10px;color:var(--dusk);margin-top:3px">영업 '+esc(s.영업시간)+(s.휴무일?' · 휴무 '+esc(s.휴무일):'')+'</div>':'')+'</div>'
       + '<a href="'+naver(s.검색어 || (p.region+' '+s.장소))+'" target="_blank" style="color:var(--naver);flex-shrink:0">'+ic('pin',17)+'</a></div>'
       + '<p class="muted" style="margin-top:6px">'+esc(s.이유||'')+'</p>'
