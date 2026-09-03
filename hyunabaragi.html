@@ -339,7 +339,74 @@ function wScore(w){
 }
 
 /* ========================= 장소 검증 (카카오 로컬) ========================= */
-let KAKAO_ERR = '';
+let KAKAO_ERR = '', GOOGLE_ERR = '';
+async function googleFind(q, center, dayIdx){
+  if(!S.settings.gkey || !q) return null;
+  const body = { textQuery:q, languageCode:'ko', regionCode:'KR', maxResultCount:10 };
+  if(center) body.locationBias = { circle:{ center:{ latitude:center[0], longitude:center[1] }, radius:20000 } };
+  try{
+    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'X-Goog-Api-Key':S.settings.gkey,
+        'X-Goog-FieldMask':'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.primaryTypeDisplayName,places.businessStatus,places.location,places.regularOpeningHours.weekdayDescriptions'
+      },
+      body:JSON.stringify(body)
+    });
+    if(!r.ok){
+      let m = '';
+      try{ const e = await r.json(); m = (e.error && e.error.message) || ''; }catch(x){}
+      GOOGLE_ERR = 'HTTP ' + r.status + (m ? ' · ' + m : '');
+      return null;
+    }
+    const d = await r.json();
+    return (d.places || []).map(x => ({
+      name:(x.displayName||{}).text || '',
+      addr:x.formattedAddress || '',
+      rating:x.rating || 0,
+      reviews:x.userRatingCount || 0,
+      type:(x.primaryTypeDisplayName||{}).text || '',
+      open:((x.regularOpeningHours||{}).weekdayDescriptions || [])[dayIdx] || '',
+      lat:(x.location||{}).latitude, lon:(x.location||{}).longitude,
+      live:(x.businessStatus === 'OPERATIONAL')
+    }));
+  }catch(e){ GOOGLE_ERR = '요청 차단됨'; return null; }
+}
+async function googleVerify(list, region, nameKey, dateISO){
+  GOOGLE_ERR = '';
+  if(!S.settings.gkey) return false;
+  const center = krLookup(region);
+  const dayIdx = (new Date(dateISO + 'T00:00:00').getDay() + 6) % 7;
+  const minR = 4.0, minN = 50;
+  const used = [];
+  for(const st of list){
+    const q = (region || '') + ' ' + (st[nameKey] || '');
+    const docs = await googleFind(q, center, dayIdx);
+    if(docs === null) return false;
+    const cand = docs.filter(d => d.live && d.rating >= minR && d.reviews >= minN
+      && used.indexOf(d.name) < 0
+      && !FRANCHISE.test(d.name) && !BADPLACE.test(d.name)
+      && nameMatch(st[nameKey] || '', d.name));
+    const doc = cand.sort((a,b) => b.reviews - a.reviews)[0];
+    if(doc){
+      used.push(doc.name);
+      st[nameKey] = doc.name;
+      st.주소 = doc.addr;
+      st.평점 = String(doc.rating);
+      st.인기근거 = '구글 리뷰 ' + doc.reviews.toLocaleString() + '개';
+      st.업종 = doc.type || st.업종 || '';
+      if(doc.open) st.영업시간 = doc.open.replace(/^[가-힣]+요일:\s*/, '');
+      st.lat = doc.lat; st.lon = doc.lon;
+      st.확인 = 'g';
+    } else {
+      st.확인 = 'no';
+      st.인기근거 = '';
+      st.평점 = '';
+    }
+  }
+  return true;
+}
 const CATCODE = { 'FD6':'음식점','CE7':'카페','AT4':'관광명소','CT1':'문화시설','AD5':'숙박','MT1':'마트','CS2':'편의점','PK6':'주차장','SW8':'지하철' };
 function nameCode(name){
   const n = String(name || '');
@@ -797,6 +864,14 @@ function chipRow(label, opts, val, name){
 }
 function nextWeekend(){ const d = new Date(); d.setDate(d.getDate() + (((6-d.getDay()+7)%7) || 7)); return iso(d); }
 
+const SLOTS = [
+  { label:'점심',      time:'13:00', kind:'밥집' },
+  { label:'오후 일정', time:'14:30', kind:'' },
+  { label:'카페',      time:'16:00', kind:'카페' },
+  { label:'해질 무렵', time:'17:10', kind:'' },
+  { label:'저녁',      time:'18:00', kind:'밥집' },
+  { label:'저녁 이후', time:'19:40', kind:'' },
+];
 const MOODRULE = {
   '감성 · 분위기':'분위기 좋은 공간이 중심축이다. 뷰·조명·인테리어가 뛰어난 개인 운영 공간 2곳과 노을 또는 야경 포인트 1곳을 축으로 삼고, 그에 어울리는 식사를 곁들여라. 패스트푸드·햄버거·분식·프랜차이즈 카페는 이 컨셉에 절대 넣지 마라. 조용하고 사진이 잘 나오며 인테리어로 알려진 곳만 골라라.',
   '액티브':'몸을 쓰는 활동이 중심축이다. 트레킹·자전거·해양레저·클라이밍·체험 중 2곳을 축으로 삼고, 활동 사이에 에너지 채울 식사 1곳과 마무리로 쉴 곳 1곳을 곁들여라. 카페에 오래 앉는 구성은 금지.',
@@ -859,10 +934,7 @@ async function runPlan(){
     + '[두 사람 취향]\n'+tasteBrief()+'\n\n'
     + '[가본 곳 (가게 | 종류 | 메뉴 | 별점 | 며칠 전)]\n'+liked+'\n다녀온 여행지: '+been+'\n가보고 싶어하는 곳: '+wish+'\n'
     + '- 싫어한다고 적힌 것은 절대 넣지 마라.\n- 강수확률이 높으면 실내 위주.\n\n'
-    + '[식사 시간 — 반드시]\n'
-    + '- 점심 식사는 13:00 또는 13:30에 시작하도록 고정하라. 특별한 이유가 없으면 이 시간을 벗어나지 마라.\n'
-    + '- 저녁 식사는 18:00 또는 18:30에 시작하도록 고정하라.\n'
-    + '- 두 끼 모두 반드시 코스에 넣어라. 그 시간대에 카페나 전시를 배치하지 마라.\n\n'
+
     + '[영업시간 — 반드시 확인하라]\n'
     + '- 각 장소의 영업시간과 휴무일을 웹 검색으로 확인하라.\n'
     + '- '+dowKo(t.date)+'요일에 쉬는 곳은 코스에 절대 넣지 마라. 그날 문 여는 곳만 골라라.\n'
@@ -884,9 +956,9 @@ async function runPlan(){
     + '- 프랜차이즈는 넣지 마라. 스타벅스, 투썸플레이스, 메가커피, 맘스터치 같은 곳은 금지다. 단 그 지점만의 특별한 뷰·건물·한정 메뉴·행사가 있으면 예외로 넣되 그 이유를 밝혀라.\n'
     + '- 병원, 의원, 학원, 부동산 같은 데이트와 무관한 업소는 절대 넣지 마라.\n'
     + '- "인기근거"에 왜 이곳이 인기 있는지 한 줄로 적어라. 예: 네이버 리뷰 1200개, 인스타 해시태그 다수.\n\n'
-    + '[분량]\n'
-    + '- 장소는 6~7곳. 점심부터 시작해 저녁을 먹고, 저녁 이후 일정을 최소 1곳 더 넣어 마무리하라.\n'
-    + '- 저녁 이후는 야경 명소, 바닷가 산책, 분위기 좋은 술집, 야시장, 심야 카페 중에서 고르라.\n'
+    + '[코스 구성 — 아래 6칸을 순서대로 정확히 채워라]\n'
+    + '1) 점심 — 밥집\n2) 오후 일정 — 컨셉에 맞는 활동\n3) 카페 — 디저트나 커피\n4) 해질 무렵 — 산책·전망·구경\n5) 저녁 — 밥집\n6) 저녁 이후 — 야경, 바닷가 산책, 분위기 좋은 술집, 야시장, 심야 카페 중 하나\n'
+    + '- "코스" 배열에 정확히 6개를 이 순서로 담아라. 시간은 앱이 정하니 적지 않아도 된다.\n'
     + '- 같은 장소를 두 번 넣지 마라. 모든 장소는 서로 달라야 한다.\n'
     + '- "종류"는 그 장소의 실제 성격을 정확히 적어라. 항구나 해변을 카페로, 공원을 식당으로 적지 마라.\n'
     + '- "이유"에는 검색으로 확인한 사실만 써라. 오션뷰·통창·루프탑·노을 명당 같은 묘사는 실제로 확인했을 때만 쓰고, 아니면 쓰지 마라.\n'
@@ -894,7 +966,7 @@ async function runPlan(){
     + '- 각 장소의 "이유"는 한 문장으로 짧게. 그곳이 어떤 곳이고 왜 이 컨셉에 맞는지만 적어라.\n'
     + '- "리포트"는 네 문장으로. 이 코스의 흐름과 하이라이트를 설명하라.\n\n'
     + '[출력 JSON]\n{"제목":"15자 이내","한줄":"한 문장","점수":{"취향":85,"동선":90,"신선함":80},'
-    + '"코스":[{"시간":"11:30","장소":"","종류":"밥집","동네":"죽도동","평점":"4.4","영업시간":"11:00-21:00","휴무일":"월요일","인기근거":"네이버 리뷰 800개","재방문":false,"이유":"두 문장","검색어":"","대체검색어":"","예상비용":"4만원"}],'
+    + '"코스":[{"장소":"","종류":"밥집","동네":"죽도동","이유":"한 문장","검색어":"","대체검색어":"","예상비용":"4만원"}],'
     + '"총예상비용":"둘이 12만원","트렌드":"한 문장","우천대안":"한 문장","리포트":"네 문장","챙길것":["",""]}';
 
   try{
@@ -906,7 +978,19 @@ async function runPlan(){
     const total = Math.round(bd.날씨*.3 + bd.취향*.3 + bd.동선*.2 + bd.신선함*.2);
     S.tmp.plan = { id:uid(), title:r.제목, one:r.한줄, date:t.date, region:t.region, mood:t.mood, move:t.move, w:w, bd:bd, total:total,
       course:r.코스||[], cost:r.총예상비용, trend:r.트렌드, rainplan:r.우천대안, report:r.리포트, bring:(r.챙길것||[]).join(', ') };
-    if(S.settings.kakao){
+    (S.tmp.plan.course || []).forEach((st, idx) => {
+      const sl = SLOTS[idx] || SLOTS[SLOTS.length-1];
+      st.시간 = sl.time; st.칸 = sl.label;
+    });
+    if(S.settings.gkey){
+      btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 평점·리뷰 확인 중…';
+      const gok = await googleVerify(S.tmp.plan.course, t.region, '장소', t.date);
+      if(gok){
+        const kept = S.tmp.plan.course.filter(x => x.확인 === 'g');
+        if(kept.length) S.tmp.plan.course = kept;
+      } else S.tmp.plan.gErr = GOOGLE_ERR;
+    }
+    if(S.settings.kakao && !S.settings.gkey){
       btn.innerHTML = '<span class="spin">'+ic('sparkle',15,'#fff')+'</span> 실제 장소 확인 중…';
       const ok = await verifyStops(S.tmp.plan.course, t.region, '장소', '검색어', '대체검색어');
       if(ok){
@@ -959,7 +1043,9 @@ function planHTML(p){
     if(x[1]) h += '<div style="display:flex;gap:10px;padding:5px 0;border-top:1px solid var(--line)"><span style="font-family:var(--mono);font-size:9.5px;color:var(--glow);width:66px;flex-shrink:0;padding-top:4px">'+x[0]+'</span><span style="font-size:13px;line-height:1.7">'+esc(x[1])+'</span></div>';
   });
   if(p.report) h += '<div style="background:var(--soft);border-radius:14px;padding:14px;margin-top:14px"><span class="eyebrow">총평</span><p style="font-family:var(--disp);font-size:14.5px;line-height:1.9;margin-top:6px">'+esc(p.report)+'</p></div>';
-  if(p.kakaoErr) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">카카오 장소 검증 실패 · '+esc(p.kakaoErr)+'. 검증 없이 그대로 보여줄게.</p>';
+  if(p.gErr) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">구글 검증 실패 · '+esc(p.gErr)+'</p>';
+  else if(!S.settings.gkey) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">평점·리뷰는 AI 추정이라 부정확해. 우리 탭에서 Google Places 키를 넣으면 실제 수치로 걸러줘.</p>';
+  if(p.kakaoErr) h += '<p class="hint" style="margin-top:6px;color:var(--rose)">카카오 장소 검증 실패 · '+esc(p.kakaoErr)+'. 검증 없이 그대로 보여줄게.</p>';
   else if(!S.settings.kakao) h += '<p class="hint" style="margin-top:12px;color:var(--rose)">장소 검증이 꺼져 있어. 우리 탭에서 카카오 키를 넣으면 없는 가게를 걸러낼 수 있어.</p>';
   h += '<div class="row" style="margin-top:14px"><button class="ghost sun" data-act="savecourse">'+ic('save',13)+' 이 코스 저장</button>'
     + '<a class="ghost nv" href="'+naver(p.region+' '+(p.course[0]?p.course[0].장소:''))+'" target="_blank">'+ic('pin',13)+' 지도로 열기</a></div></div>';
@@ -1211,6 +1297,8 @@ function viewUs(){
     + '<button class="chip'+(S.whoami===S.settings.you?' on':'')+'" data-act="whoami" data-v="'+esc(S.settings.you)+'">'+esc(S.settings.you)+'</button></div>'
     + '<label class="lbl">처음 만난 날</label><input class="inp" type="date" id="sstart" value="'+S.settings.start+'">'
     + '<label class="lbl">주로 만나는 지역</label><input class="inp" id="sregion" value="'+esc(S.settings.region)+'">'
+    + '<label class="lbl">Google Places 키 (평점·리뷰 검증용)</label><input class="inp" id="sgkey" type="password" value="'+esc(S.settings.gkey||'')+'" placeholder="AIza... (선택)">'
+    + '<p class="hint" style="margin:-4px 0 12px">'+(S.settings.gkey?'켜져 있어. 평점 4.0 이상, 리뷰 50개 이상인 곳만 통과시켜.':'없으면 평점·리뷰는 AI 추정이라 믿을 수 없어. 넣으면 실제 구글 평점과 리뷰 수로 걸러줘.')+'</p>'
     + '<label class="lbl">카카오 REST 키 (장소 검증용)</label><input class="inp" id="skakao" type="password" value="'+esc(S.settings.kakao||'')+'" placeholder="없어도 되지만 넣으면 정확해져">'
     + '<p class="hint" style="margin:-4px 0 12px">'+(S.settings.kakao?'켜져 있어. AI가 고른 곳을 실제 지도 데이터와 대조해서, 없는 가게는 빼고 이름·주소를 정확하게 고쳐줘.':'꺼져 있어. 이걸 넣어야 없는 가게를 걸러낼 수 있어. developers.kakao.com 에서 무료.')+'</p>'
     + '<label class="lbl">지도 열기</label><div class="chips">'
@@ -1649,7 +1737,7 @@ document.addEventListener('click', async (e) => {
   }
   if(a === 'savesettings'){
     S.settings = { me:$('#sme').value||'나', you:$('#syou').value||'너', start:$('#sstart').value, region:$('#sregion').value,
-      key:$('#skey').value.trim(), provider:S.settings.provider||'gemini', model:$('#smodel').value.trim(), mapweb:!!S.settings.mapweb, kakao:($('#skakao')?$('#skakao').value.trim():(S.settings.kakao||'')) };
+      key:$('#skey').value.trim(), provider:S.settings.provider||'gemini', model:$('#smodel').value.trim(), mapweb:!!S.settings.mapweb, kakao:($('#skakao')?$('#skakao').value.trim():(S.settings.kakao||'')), gkey:($('#sgkey')?$('#sgkey').value.trim():(S.settings.gkey||'')) };
     save('settings');
     if([S.settings.me, S.settings.you].indexOf(S.whoami) < 0){ S.whoami = S.settings.me; save('whoami'); }
     toast('저장했어'); render(); return;
