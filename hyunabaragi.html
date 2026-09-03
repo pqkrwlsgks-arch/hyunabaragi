@@ -940,6 +940,7 @@ function planHTML(p){
   if(p.w) h += '<div style="background:var(--soft);border-radius:14px;padding:12px;margin-top:14px"><div style="font-size:13.5px">'+esc(p.w.place)+' · '+esc(p.w.label)+'</div><div style="font-family:var(--mono);font-size:10.5px;color:var(--sub);margin-top:3px">'+p.w.tmin+'° / '+p.w.tmax+'° · 강수 '+p.w.rain+'% · 바람 '+p.w.wind+'km/h</div></div>';
   h += '<div style="margin-top:18px"><span class="eyebrow">코스</span><div style="margin-top:10px">';
   p.course.forEach((s,i) => {
+    const leg = (i < p.course.length - 1) ? legInfo(s, p.course[i+1], p.move || '자차') : null;
     h += '<div style="display:flex;gap:12px"><div style="width:46px;flex-shrink:0;text-align:left"><span style="font-family:var(--mono);font-size:11px;color:var(--rose)">'+esc(s.시간)+'</span></div>'
       + '<div style="flex:1;padding-bottom:16px;border-left:1px solid var(--line);padding-left:14px;margin-left:-8px">'
       + '<div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><div style="font-family:var(--disp);font-size:16.5px">'+esc(s.장소)+'</div>'
